@@ -1,0 +1,133 @@
+services:
+  mariadb:
+    image: mariadb:10.8
+    container_name: frappe_mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    networks:
+      - frappe-network
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: frappe_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - frappe-network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  frappe:
+    build: .
+    image: frappe1tapinstall-custom:latest
+    container_name: frappe_app
+    user: root
+    command: bash -c "chown -R frappe:frappe /home/frappe/frappe-bench /persistent/sites /home/frappe/backups /home/frappe/logs && sed -i 's/\r$//' /workspace/init.sh && gosu frappe bash /workspace/init.sh"
+    environment:
+      - SHELL=/bin/bash
+      - SITE_NAME=${SITE_NAME}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - FRAPPE_REPO=${FRAPPE_REPO}
+      - FRAPPE_BRANCH=${FRAPPE_BRANCH}
+      - ERPNEXT_REPO=${ERPNEXT_REPO}
+      - ERPNEXT_BRANCH=${ERPNEXT_BRANCH}
+      - HRMS_REPO=${HRMS_REPO}
+      - HRMS_BRANCH=${HRMS_BRANCH}
+      - CRM_REPO=${CRM_REPO}
+      - CRM_BRANCH=${CRM_BRANCH}
+      - PAYMENT_REPO=${PAYMENT_REPO}
+      - PAYMENT_BRANCH=${PAYMENT_BRANCH}
+      - INDIA_COMPLIANCE_REPO=${INDIA_COMPLIANCE_REPO}
+      - INDIA_COMPLIANCE_BRANCH=${INDIA_COMPLIANCE_BRANCH}
+      - FRAPPE_S3_ATTACHMENT_REPO=${FRAPPE_S3_ATTACHMENT_REPO}
+      - FRAPPE_S3_ATTACHMENT_BRANCH=${FRAPPE_S3_ATTACHMENT_BRANCH}
+    working_dir: /home/frappe
+    volumes:
+      - .:/workspace
+      - bench-data:/home/frappe/frappe-bench
+      - sites-data:/persistent/sites
+      - backup-data:/home/frappe/backups
+      - frappe-logs:/home/frappe/logs
+    ports:
+      - "8000:8000"
+      - "9000:9000"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - frappe-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/method/ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    restart: unless-stopped
+
+  backup:
+    build: .
+    image: frappe1tapinstall-custom:latest
+    container_name: frappe_backup
+    user: root
+    command: bash -c "chown -R frappe:frappe /home/frappe/frappe-bench /persistent/sites /home/frappe/backups && sed -i 's/\r$//' /workspace/backup.sh && gosu frappe bash /workspace/backup.sh"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - SITE_NAME=${SITE_NAME}
+      - BACKUP_INTERVAL_SECONDS=${BACKUP_INTERVAL_SECONDS}
+    working_dir: /home/frappe
+    volumes:
+      - .:/workspace
+      - bench-data:/home/frappe/frappe-bench
+      - sites-data:/persistent/sites
+      - backup-data:/home/frappe/backups
+    depends_on:
+      - mariadb
+      - frappe
+    networks:
+      - frappe-network
+    restart: unless-stopped
+
+volumes:
+  mariadb-data:
+    driver: local
+  redis-data:
+    driver: local
+  sites-data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./persistent/sites
+  backup-data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./persistent/backups
+  bench-data:
+    driver: local
+  frappe-logs:
+    driver: local
+
+networks:
+  frappe-network:
+    driver: bridge
