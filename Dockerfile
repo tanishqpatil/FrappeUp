@@ -30,10 +30,10 @@ RUN set -eux; \
     gosu --version
 
 # Install bench globally
-RUN pip install frappe-bench
+RUN pip install --no-cache-dir frappe-bench
 
 # Set up PATH to include global Python packages
 ENV PATH="/usr/local/bin:${PATH}"
 
 # Create a symlink from the virtual environment bench to global bench
-RUN ln -sf /home/frappe/frappe-bench/env/bin/bench /usr/local/bin/bench
+# RUN ln -sf /home/frappe/frappe-bench/env/bin/bench /usr/local/bin/bench

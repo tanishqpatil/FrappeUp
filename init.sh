@@ -55,7 +55,7 @@ CRM_REPO=${CRM_REPO:-https://github.com/frappe/crm}
 CRM_BRANCH=${CRM_BRANCH:-v1.52.2}
 PAYMENT_REPO=${PAYMENT_REPO:-https://github.com/frappe/payments}
 PAYMENT_BRANCH=${PAYMENT_BRANCH:-version-15}
-INDIA_COMPLIANCE_REPO=${INDIA_COMPLIANCE_REPO:-https://github.com/frappe/india_compliance}
+INDIA_COMPLIANCE_REPO=${INDIA_COMPLIANCE_REPO:-https://github.com/resilient-tech/india-compliance}
 INDIA_COMPLIANCE_BRANCH=${INDIA_COMPLIANCE_BRANCH:-v15.20.1}
 FRAPPE_S3_ATTACHMENT_REPO=${FRAPPE_S3_ATTACHMENT_REPO:-https://github.com/zerodha/frappe-attachments-s3}
 FRAPPE_S3_ATTACHMENT_BRANCH=${FRAPPE_S3_ATTACHMENT_BRANCH:-master}
@@ -158,12 +158,42 @@ bench set-redis-socketio-host redis://redis:6379
 sed -i '/redis/d' ./Procfile
 # # sed -i '/watch/d' ./Procfile
 
-bench get-app --branch $ERPNEXT_BRANCH $ERPNEXT_REPO
-bench get-app --branch $HRMS_BRANCH $HRMS_REPO
-bench get-app --branch $CRM_BRANCH $CRM_REPO
-bench get-app --branch $PAYMENT_BRANCH $PAYMENT_REPO
-bench get-app --branch $INDIA_COMPLIANCE_BRANCH $INDIA_COMPLIANCE_REPO
-bench get-app --branch $FRAPPE_S3_ATTACHMENT_BRANCH $FRAPPE_S3_ATTACHMENT_REPO
+# Dynamic App Installation
+APP_INSTALL_LIST=""
+
+# Split INSTALL_APPS by comma
+IFS=',' read -ra APPS <<< "$INSTALL_APPS"
+
+for app in "${APPS[@]}"; do
+    # Trim whitespace
+    app=$(echo "$app" | xargs)
+    if [ -z "$app" ]; then continue; fi
+
+    # Convert app name to uppercase for variable lookup (e.g. erpnext -> ERPNEXT)
+    # handling - as _ for variable names if needed, but assuming standard apps are safe
+    app_upper=$(echo "$app" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+    
+    repo_var="${app_upper}_REPO"
+    branch_var="${app_upper}_BRANCH"
+
+    # Indirect variable expansion
+    repo_url="${!repo_var}"
+    branch_name="${!branch_var}"
+
+    if [ -n "$repo_url" ]; then
+        log "Fetching app $app from $repo_url ($branch_name)..."
+        if [ -n "$branch_name" ]; then
+            bench get-app --branch "$branch_name" "$repo_url"
+        else
+            bench get-app "$repo_url"
+        fi
+        
+        # Add to list for installation
+        APP_INSTALL_LIST="$APP_INSTALL_LIST $app"
+    else
+        log_warning "Repository URL for $app (variable $repo_var) not found. Skipping."
+    fi
+done
 
 bench new-site $SITE_NAME \
     --force \
@@ -175,14 +205,28 @@ bench new-site $SITE_NAME \
 if restore_latest_backup; then
     log_success "Site restored from backup successfully."
 else
-    log "Performing a fresh installation of apps..."
-    bench --site $SITE_NAME install-app erpnext
-    bench --site $SITE_NAME install-app hrms
-    bench --site $SITE_NAME install-app crm
-    bench --site $SITE_NAME install-app payments
-    bench --site $SITE_NAME install-app india_compliance
-    bench --site $SITE_NAME install-app frappe_s3_attachment
-    log_success "All apps installed successfully."
+    if [ -n "$APP_INSTALL_LIST" ]; then
+        log "Performing a fresh installation of apps: $APP_INSTALL_LIST"
+        # shellcheck disable=SC2086
+        bench --site "$SITE_NAME" install-app $APP_INSTALL_LIST
+        log_success "Apps installed successfully."
+    else
+        log_warning "No apps configured to install."
+    fi
+
+    # Auto-configure S3 if installed
+    if bench --site "$SITE_NAME" list-apps | grep -q "frappe_s3_attachment"; then
+        if [ -n "$S3_ENDPOINT_URL" ]; then
+            log "Configuring Local S3 (MinIO) settings..."
+            bench --site "$SITE_NAME" set-config s3_endpoint_url "$S3_ENDPOINT_URL"
+            bench --site "$SITE_NAME" set-config s3_access_key "$S3_ACCESS_KEY"
+            bench --site "$SITE_NAME" set-config s3_secret_key "$S3_SECRET_KEY"
+            bench --site "$SITE_NAME" set-config bucket_name "$S3_BUCKET_NAME"
+            # Optional: Disable SSL verification for local dev
+            # bench --site "$SITE_NAME" set-config --as-dict s3_verify False
+            log_success "S3 configuration applied."
+        fi
+    fi
 fi
 
 bench --site $SITE_NAME set-config developer_mode 1

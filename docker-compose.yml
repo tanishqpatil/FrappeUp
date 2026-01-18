@@ -1,7 +1,8 @@
 services:
   mariadb:
-    image: mariadb:10.8
+    image: mariadb:10.11
     container_name: frappe_mariadb
+    command: --performance-schema=OFF --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_CHARACTER_SET_SERVER: utf8mb4
@@ -11,11 +12,34 @@ services:
     networks:
       - frappe-network
     healthcheck:
-      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}" ]
+      test: [ "CMD-SHELL", "mysqladmin ping -h localhost -u root --password=$MYSQL_ROOT_PASSWORD" ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    ports:
+      - "29000:9000"
+      - "29001:9001"
+    networks:
+      - frappe-network
+    restart: unless-stopped
+
+  adminer:
+    image: adminer
+    ports:
+      - "28080:8080"
+    networks:
+      - frappe-network
     restart: unless-stopped
 
   redis:
@@ -58,6 +82,13 @@ services:
       - INDIA_COMPLIANCE_BRANCH=${INDIA_COMPLIANCE_BRANCH}
       - FRAPPE_S3_ATTACHMENT_REPO=${FRAPPE_S3_ATTACHMENT_REPO}
       - FRAPPE_S3_ATTACHMENT_BRANCH=${FRAPPE_S3_ATTACHMENT_BRANCH}
+      - FRAPPE_S3_ATTACHMENT_REPO=${FRAPPE_S3_ATTACHMENT_REPO}
+      - FRAPPE_S3_ATTACHMENT_BRANCH=${FRAPPE_S3_ATTACHMENT_BRANCH}
+      - INSTALL_APPS=${INSTALL_APPS}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
     working_dir: /home/frappe
     volumes:
       - .:/workspace
@@ -110,6 +141,8 @@ volumes:
   mariadb-data:
     driver: local
   redis-data:
+    driver: local
+  minio-data:
     driver: local
   sites-data:
     driver: local

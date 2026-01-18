@@ -1,0 +1,46 @@
+# Site Configuration
+SITE_NAME=site.localhost
+ADMIN_PASSWORD=admin
+
+# Database Configuration
+MYSQL_ROOT_PASSWORD=123
+
+# Frappe Configuration
+FRAPPE_REPO=https://github.com/frappe/frappe
+FRAPPE_BRANCH=version-16
+
+# ERPNext Configuration
+ERPNEXT_REPO=https://github.com/frappe/erpnext
+ERPNEXT_BRANCH=version-16
+
+# HRMS Configuration
+HRMS_REPO=https://github.com/frappe/hrms
+HRMS_BRANCH=version-16
+
+# CRM Configuration
+CRM_REPO=https://github.com/frappe/crm
+CRM_BRANCH=v1.57.9
+
+# Payments Configuration
+PAYMENT_REPO=https://github.com/frappe/payments
+PAYMENT_BRANCH=version-15
+
+# India Compliance Configuration
+INDIA_COMPLIANCE_REPO=https://github.com/resilient-tech/india-compliance
+INDIA_COMPLIANCE_BRANCH=v16.0.0
+
+# frappe-attachments-s3
+FRAPPE_S3_ATTACHMENT_REPO=https://github.com/zerodha/frappe-attachments-s3
+FRAPPE_S3_ATTACHMENT_BRANCH=master
+
+# Backup Time
+BACKUP_INTERVAL_SECONDS=43200
+
+# Apps to Install (comma separated)
+INSTALL_APPS=erpnext,hrms,crm,payments,india_compliance,frappe_s3_attachment
+
+# S3 Configuration (MinIO)
+S3_ENDPOINT_URL=http://minio:9000
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET_NAME=frappe-local
