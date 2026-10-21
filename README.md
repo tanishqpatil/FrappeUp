@@ -57,6 +57,12 @@ The only implemented install profile is **development**. Production may be plann
 
 ## Releases
 
-After a tagged release is published, `install.sh` and `install.ps1` can download checksum-verified script bundles. This source checkout works immediately without a release. Releases and source: [github.com/tanishqpatil/FrappeUp](https://github.com/tanishqpatil/FrappeUp).
+The [v0.3.0 release](https://github.com/tanishqpatil/FrappeUp/releases/tag/v0.3.0) contains checksum-verified shell and PowerShell bundles. On macOS or Linux, install without cloning:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tanishqpatil/FrappeUp/master/install.sh | sh
+```
+
+The installer prints the command directory to add to `PATH` if needed. For Windows, download the release ZIP or run `install.ps1` from a checkout. The source checkout also works immediately without a release.
 
 Licensed under [Apache-2.0](LICENSE).
