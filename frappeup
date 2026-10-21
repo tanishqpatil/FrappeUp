@@ -14,8 +14,10 @@ CATALOG_FILE="$ROOT_DIR/catalog/official-apps.env"
 # shellcheck source=catalog/official-apps.env
 . "$CATALOG_FILE"
 
-VERSION='0.3.1'
+VERSION='0.4.0'
 ENV_FILE=''
+CURRENT_ENV_FILE=''
+BACKUP_DIR=''
 LOCK_FILE=''
 FORCE=false
 LINES=100
@@ -23,6 +25,7 @@ FOLLOW=false
 DOCKER_LOGS=false
 PLAN_APPS=''
 EXISTING_ACTION='ask'
+YES=false
 
 usage() {
   cat <<'TEXT'
@@ -35,6 +38,12 @@ Usage:
   frappeup lock --env-file PATH [--output PATH] [--force]
   frappeup workspace --env-file PATH [--lock-file PATH] [--force]
   frappeup install --env-file PATH [--existing keep]
+  frappeup app prepare --current-env-file CURRENT --env-file TARGET
+  frappeup app plan --current-env-file CURRENT --env-file TARGET
+  frappeup app apply --current-env-file CURRENT --env-file TARGET [--yes]
+  frappeup backup --env-file PATH
+  frappeup backup verify --backup-dir PATH
+  frappeup restore --env-file PROFILE --backup-dir PATH [--yes]
   frappeup credentials --env-file PATH
   frappeup status --env-file PATH
   frappeup logs --env-file PATH [--docker] [--lines N] [--follow]
@@ -47,9 +56,12 @@ parse_common() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --env-file) [ "$#" -gt 1 ] || fail '--env-file needs a path'; ENV_FILE=$2; shift 2 ;;
+      --current-env-file) [ "$#" -gt 1 ] || fail '--current-env-file needs a path'; CURRENT_ENV_FILE=$2; shift 2 ;;
+      --backup-dir) [ "$#" -gt 1 ] || fail '--backup-dir needs a path'; BACKUP_DIR=$2; shift 2 ;;
       --lock-file) [ "$#" -gt 1 ] || fail '--lock-file needs a path'; LOCK_FILE=$2; shift 2 ;;
       --output) [ "$#" -gt 1 ] || fail '--output needs a path'; LOCK_FILE=$2; shift 2 ;;
       --force) FORCE=true; shift ;;
+      --yes) YES=true; shift ;;
       --lines) [ "$#" -gt 1 ] || fail '--lines needs a number'; LINES=$2; shift 2 ;;
       --follow) FOLLOW=true; shift ;;
       --docker) DOCKER_LOGS=true; shift ;;
@@ -239,11 +251,22 @@ workspace_command() {
   printf 'Created workspace %s\n' "$WORKSPACE_DIR"
 }
 
-compose_runtime() {
+compose_at() (
+  workspace=$1; shift
+  runtime="$workspace/runtime"
   if [ -r "$runtime/.frappeup.env" ]; then runtime_env="$runtime/.frappeup.env"; else runtime_env="$runtime/.frappe1tap.env"; fi
   if [ -r "$runtime/frappeup.create-site.yaml" ]; then site_compose="$runtime/frappeup.create-site.yaml"; else site_compose="$runtime/frappe1tap.create-site.yaml"; fi
-  docker compose --env-file "$runtime_env" --env-file "$WORKSPACE_DIR/credentials.env" -p "$PROJECT_NAME" -f "$runtime/compose.yaml" -f "$runtime/overrides/compose.mariadb.yaml" -f "$runtime/overrides/compose.redis.yaml" -f "$runtime/overrides/compose.noproxy.yaml" -f "$site_compose" "$@"
-}
+  if [ -r "$site_compose" ] && [ -n "${COMPOSE_EXTRA_FILE:-}" ]; then
+    docker compose --env-file "$runtime_env" --env-file "$workspace/credentials.env" -p "$PROJECT_NAME" -f "$runtime/compose.yaml" -f "$runtime/overrides/compose.mariadb.yaml" -f "$runtime/overrides/compose.redis.yaml" -f "$runtime/overrides/compose.noproxy.yaml" -f "$site_compose" -f "$COMPOSE_EXTRA_FILE" "$@"
+  elif [ -r "$site_compose" ]; then
+    docker compose --env-file "$runtime_env" --env-file "$workspace/credentials.env" -p "$PROJECT_NAME" -f "$runtime/compose.yaml" -f "$runtime/overrides/compose.mariadb.yaml" -f "$runtime/overrides/compose.redis.yaml" -f "$runtime/overrides/compose.noproxy.yaml" -f "$site_compose" "$@"
+  elif [ -n "${COMPOSE_EXTRA_FILE:-}" ]; then
+    docker compose --env-file "$runtime_env" --env-file "$workspace/credentials.env" -p "$PROJECT_NAME" -f "$runtime/compose.yaml" -f "$runtime/overrides/compose.mariadb.yaml" -f "$runtime/overrides/compose.redis.yaml" -f "$runtime/overrides/compose.noproxy.yaml" -f "$COMPOSE_EXTRA_FILE" "$@"
+  else
+    docker compose --env-file "$runtime_env" --env-file "$workspace/credentials.env" -p "$PROJECT_NAME" -f "$runtime/compose.yaml" -f "$runtime/overrides/compose.mariadb.yaml" -f "$runtime/overrides/compose.redis.yaml" -f "$runtime/overrides/compose.noproxy.yaml" "$@"
+  fi
+)
+compose_runtime() { compose_at "$WORKSPACE_DIR" "$@"; }
 
 project_resources() {
   container_ids=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME") || fail 'cannot inspect Docker containers'
@@ -265,18 +288,19 @@ choose_existing_action() {
   case "$answer" in r|R|reset|RESET) return 0;; ''|k|K|keep|KEEP) printf 'Keeping existing data and deployment; no changes made.\n'; return 1;; *) fail 'invalid choice; no changes made';; esac
 }
 
-backup_before_reset() {
-  backend_id=$(compose_runtime ps -q backend 2>/dev/null) || backend_id=''
-  [ -n "$backend_id" ] || fail 'reset requires a running backend to create a verified backup; no data was changed'
-  compose_runtime exec -T backend bench --site "$SITE_NAME" list-apps >/dev/null || fail "site $SITE_NAME is not available for backup; no data was changed"
+backup_site() {
+  backup_workspace=$1 backup_purpose=$2
+  backend_id=$(compose_at "$backup_workspace" ps -q backend 2>/dev/null) || backend_id=''
+  [ -n "$backend_id" ] || fail 'backup requires a running backend; no data was changed'
+  compose_at "$backup_workspace" exec -T backend bench --site "$SITE_NAME" list-apps >/dev/null || fail "site $SITE_NAME is not available for backup; no data was changed"
   stamp=$(date -u '+%Y%m%d_%H%M%S')
-  backup_dir="$ENV_DIR/.frappeup/backups/$PROJECT_NAME/$stamp-$$"
+  backup_dir="$ENV_DIR/.frappeup/backups/$PROJECT_NAME/$backup_purpose-$stamp-$$"
   # Frappe expects private/backups to contain files only; a directory there
   # makes its next backup fail in delete_temp_backups().
-  container_backup="/home/frappe/frappe-bench/sites/.frappeup-backups/$SITE_NAME/reset-$stamp-$$"
+  container_backup="/home/frappe/frappe-bench/sites/.frappeup-backups/$SITE_NAME/$backup_purpose-$stamp-$$"
   umask 077
   mkdir -p "$backup_dir"
-  compose_runtime exec -T backend bench --site "$SITE_NAME" backup --with-files --compress --backup-path "$container_backup" || fail "backup failed; no data was changed (partial files: $backup_dir)"
+  compose_at "$backup_workspace" exec -T backend bench --site "$SITE_NAME" backup --with-files --compress --backup-path "$container_backup" || fail "backup failed; no data was changed (partial files: $backup_dir)"
   docker cp "$backend_id:$container_backup/." "$backup_dir" || fail "backup export failed; no data was changed (partial files: $backup_dir)"
   database_archive=$(find "$backup_dir" -maxdepth 1 -type f -name '*-database*.sql.gz' -size +0c -print -quit)
   public_archive=$(find "$backup_dir" -maxdepth 1 -type f -name '*-files.tgz' ! -name '*-private-files.tgz' -size +0c -print -quit)
@@ -286,8 +310,20 @@ backup_before_reset() {
   gzip -t "$database_archive" || fail 'database archive is corrupt; no data was changed'
   tar -tzf "$public_archive" >/dev/null || fail 'public files archive is corrupt; no data was changed'
   tar -tzf "$private_archive" >/dev/null || fail 'private files archive is corrupt; no data was changed'
+  {
+    for artifact in "$database_archive" "$public_archive" "$private_archive" "$config_backup"; do
+      printf '%s  %s\n' "$(sha256 < "$artifact")" "$(basename -- "$artifact")"
+    done
+  } > "$backup_dir/SHA256SUMS"
+  {
+    write_env_var BACKUP_PROJECT "$PROJECT_NAME"
+    write_env_var BACKUP_SITE "$SITE_NAME"
+    write_env_var BACKUP_IMAGE "$(docker inspect --format '{{.Config.Image}}' "$backend_id")"
+    write_env_var BACKUP_CREATED_UTC "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$backup_dir/manifest.env"
   printf 'Validated backup archives: %s\n' "$backup_dir"
 }
+backup_before_reset() { backup_site "$WORKSPACE_DIR" reset; }
 
 reset_project() {
   backup_before_reset
@@ -369,6 +405,293 @@ install_command() {
   log_event 'install.completed'
   printf 'Installed %s\n' "$SITE_NAME"
   printf 'Sign in as Administrator. Get the initial password with: frappeup credentials --env-file %s\n' "$ENV_FILE"
+}
+
+app_prepare() {
+  [ -n "$CURRENT_ENV_FILE" ] && [ -n "$ENV_FILE" ] || fail 'app prepare requires --current-env-file and --env-file'
+  target_env=$ENV_FILE
+  [ ! -e "$target_env" ] || fail "target profile already exists: $target_env"
+  ENV_FILE=$CURRENT_ENV_FILE
+  load_profile; build_plan
+  [ "$PROFILE" = development ] || fail 'app prepare currently supports development profiles only'
+  [ -d "$WORKSPACE_DIR/runtime/sources/frappe" ] || fail 'current workspace has no verifiable Frappe source snapshot'
+  current_frappe=$(git -C "$WORKSPACE_DIR/runtime/sources/frappe" rev-parse HEAD) || fail 'cannot read current Frappe commit'
+  current_docker=$(git -C "$WORKSPACE_DIR/runtime" rev-parse HEAD) || fail 'cannot read current Frappe Docker commit'
+  target_parent=$(CDPATH= cd -- "$(dirname -- "$target_env")" && pwd)
+  target_env="$target_parent/$(basename -- "$target_env")"
+  target_name=$(basename -- "$target_env" .env)
+  target_workspace="$target_parent/.frappeup/workspaces/$PROJECT_NAME-$target_name"
+  [ ! -e "$target_workspace" ] || fail "target workspace already exists: $target_workspace"
+  umask 077
+  temp_target="$target_env.tmp.$$"
+  trap 'rm -f "$temp_target"' EXIT HUP INT TERM
+  {
+    write_env_var PROFILE "$PROFILE"
+    write_env_var PROJECT_NAME "$PROJECT_NAME"
+    write_env_var SITE_NAME "$SITE_NAME"
+    write_env_var WORKSPACE_DIR "$target_workspace"
+    write_env_var FRAPPE_REPOSITORY "$FRAPPE_REPOSITORY"
+    write_env_var FRAPPE_REF "$current_frappe"
+    write_env_var FRAPPE_REF_KIND commit
+    write_env_var FRAPPE_DOCKER_REPOSITORY "$FRAPPE_DOCKER_REPOSITORY"
+    write_env_var FRAPPE_DOCKER_REF "$current_docker"
+    write_env_var FRAPPE_DOCKER_REF_KIND commit
+    write_env_var FRAPPE_MAJOR "$FRAPPE_MAJOR"
+    write_env_var INSTALL_APPS "$INSTALL_APPS"
+    if [ -n "${CUSTOM_APPS_FILE:-}" ]; then write_env_var CUSTOM_APPS_FILE "$CUSTOM_APPS_FILE"; fi
+    for id in $PLAN_APPS; do
+      current_app=$(git -C "$WORKSPACE_DIR/runtime/sources/apps/$id" rev-parse HEAD 2>/dev/null) || fail "cannot read current commit for $id"
+      key=$(upper "$id")
+      write_env_var "APP_${key}_REF" "$current_app"
+      write_env_var "APP_${key}_REF_KIND" commit
+    done
+  } > "$temp_target"
+  chmod 600 "$temp_target"
+  mv "$temp_target" "$target_env"
+  trap - EXIT HUP INT TERM
+  printf 'Created %s\nEdit INSTALL_APPS or app refs, then run lock and workspace for this target profile.\n' "$target_env"
+}
+
+app_preflight() {
+  [ -n "$CURRENT_ENV_FILE" ] || fail '--current-env-file is required for app updates'
+  [ -n "$ENV_FILE" ] || fail '--env-file is required for app updates'
+  target_env=$ENV_FILE
+  current_info=$(ENV_FILE=$CURRENT_ENV_FILE; load_profile; printf '%s\n%s\n%s\n%s\n' "$PROJECT_NAME" "$SITE_NAME" "$PROFILE" "$WORKSPACE_DIR")
+  CURRENT_PROJECT=$(printf '%s\n' "$current_info" | sed -n '1p')
+  CURRENT_SITE=$(printf '%s\n' "$current_info" | sed -n '2p')
+  CURRENT_PROFILE=$(printf '%s\n' "$current_info" | sed -n '3p')
+  CURRENT_WORKSPACE=$(printf '%s\n' "$current_info" | sed -n '4p')
+  ENV_FILE=$target_env
+  load_profile; build_plan; load_lock
+  [ "$PROFILE" = development ] && [ "$CURRENT_PROFILE" = development ] || fail 'app updates currently support development profiles only'
+  [ "$PROJECT_NAME" = "$CURRENT_PROJECT" ] && [ "$SITE_NAME" = "$CURRENT_SITE" ] || fail 'current and target profiles must use the same project and site'
+  [ -d "$CURRENT_WORKSPACE" ] && [ -d "$WORKSPACE_DIR" ] || fail 'both current and target workspaces must exist'
+  CURRENT_WORKSPACE=$(CDPATH= cd -- "$CURRENT_WORKSPACE" && pwd -P)
+  WORKSPACE_DIR=$(CDPATH= cd -- "$WORKSPACE_DIR" && pwd -P)
+  [ "$CURRENT_WORKSPACE" != "$WORKSPACE_DIR" ] || fail 'target needs a separate WORKSPACE_DIR; preserve the current workspace'
+  runtime="$WORKSPACE_DIR/runtime"
+  [ -r "$runtime/images/custom/Containerfile" ] && [ -r "$runtime/apps.json" ] && [ -r "$WORKSPACE_DIR/workspace.env" ] && [ -r "$WORKSPACE_DIR/credentials.env" ] || fail 'target workspace is incomplete; run workspace for the target profile'
+  [ -r "$CURRENT_WORKSPACE/credentials.env" ] && [ -r "$CURRENT_WORKSPACE/runtime/compose.yaml" ] || fail 'current workspace is incomplete'
+  . "$WORKSPACE_DIR/workspace.env"
+  [ "$WORKSPACE_PLAN_SHA256" = "$LOCK_PLAN_SHA256" ] || fail 'target workspace does not match its lock'
+  current_frappe=$(git -C "$CURRENT_WORKSPACE/runtime/sources/frappe" rev-parse HEAD 2>/dev/null) || fail 'cannot verify current Frappe source commit'
+  current_docker=$(git -C "$CURRENT_WORKSPACE/runtime" rev-parse HEAD 2>/dev/null) || fail 'cannot verify current Frappe Docker commit'
+  [ "$current_frappe" = "$LOCK_FRAPPE_COMMIT" ] || fail 'Frappe core changed; this first app-update path supports app changes only'
+  [ "$current_docker" = "$LOCK_FRAPPE_DOCKER_COMMIT" ] || fail 'Frappe Docker changed; pin its current commit for this app update'
+  doctor_check
+  backend_id=$(compose_at "$CURRENT_WORKSPACE" ps -q backend 2>/dev/null) || backend_id=''
+  [ -n "$backend_id" ] || fail 'current backend is not running; no data was changed'
+  owner=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$backend_id")
+  config_files=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$backend_id")
+  [ "$owner" = "$PROJECT_NAME" ] || fail 'current backend belongs to a different Compose project'
+  case ",$config_files," in *",$CURRENT_WORKSPACE/runtime/compose.yaml,"*) :;; *) fail 'running backend was not created from the current workspace';; esac
+  if [ -r "$CURRENT_WORKSPACE/runtime/.frappeup.env" ]; then current_runtime_env="$CURRENT_WORKSPACE/runtime/.frappeup.env"; else current_runtime_env="$CURRENT_WORKSPACE/runtime/.frappe1tap.env"; fi
+  [ -r "$current_runtime_env" ] || fail 'current image metadata is missing'
+  current_image=$(sed -n 's/^CUSTOM_IMAGE=//p' "$current_runtime_env")
+  current_tag=$(sed -n 's/^CUSTOM_TAG=//p' "$current_runtime_env")
+  actual_image=$(docker inspect --format '{{.Config.Image}}' "$backend_id")
+  [ "$actual_image" = "$current_image:$current_tag" ] || fail 'running backend image does not match current workspace'
+  inventory=$(compose_at "$CURRENT_WORKSPACE" exec -T backend bench --site "$SITE_NAME" list-apps) || fail 'cannot read current site app inventory'
+  installed_names=$(printf '%s\n' "$inventory" | awk '$1 ~ /^[A-Za-z][A-Za-z0-9_]*$/ {print $1}' | tr '\n' ' ')
+  contains_word "$installed_names" frappe || fail 'target is not a valid Frappe site'
+  desired_names='frappe'
+  NEW_APPS=''
+  CHANGED_APPS=''
+  for id in $PLAN_APPS; do
+    app=$(app_field "$id" APP_NAME)
+    valid_app_id "$app" || fail "invalid app package name: $app"
+    desired_names="$desired_names $app"
+    eval "target_commit=\${LOCK_APP_${id}_COMMIT-}"
+    [ -n "${target_commit:-}" ] || fail "target lock lacks app $id"
+    if contains_word "$installed_names" "$app"; then
+      [ -d "$CURRENT_WORKSPACE/runtime/sources/apps/$id" ] || fail "cannot verify current source for installed app $app"
+      current_commit=$(git -C "$CURRENT_WORKSPACE/runtime/sources/apps/$id" rev-parse HEAD 2>/dev/null) || fail "cannot verify current commit for $app"
+      [ "$current_commit" = "$target_commit" ] || CHANGED_APPS="$CHANGED_APPS $app"
+    else
+      NEW_APPS="$NEW_APPS $app"
+    fi
+  done
+  for app in $installed_names; do contains_word "$desired_names" "$app" || fail "target omits installed app $app; app removal is not supported"; done
+  NEW_APPS=$(printf '%s\n' "$NEW_APPS" | awk '{$1=$1; print}')
+  CHANGED_APPS=$(printf '%s\n' "$CHANGED_APPS" | awk '{$1=$1; print}')
+  printf 'Project: %s\nSite: %s\nCurrent image: %s\nTarget lock: %s\nNew apps: %s\nUpdated apps: %s\n' "$PROJECT_NAME" "$SITE_NAME" "$actual_image" "$LOCK_PLAN_SHA256" "${NEW_APPS:-none}" "${CHANGED_APPS:-none}"
+  printf 'The app update takes a full backup, pauses application services, migrates the preserved site, then verifies service and site health. Writes and web requests will be unavailable during migration.\n'
+}
+
+app_apply_cleanup() {
+  result=$?
+  if [ "$result" -ne 0 ]; then app_phase failed; fi
+  if [ "$result" -ne 0 ] && [ "${APP_SERVICES_PAUSED:-false}" = true ] && [ "${APP_MIGRATION_STARTED:-false}" = false ]; then
+    compose_at "$CURRENT_WORKSPACE" up -d --no-deps backend frontend websocket queue-short queue-long scheduler >/dev/null 2>&1 || printf 'Could not restart the original services; inspect Docker logs.\n' >&2
+  fi
+  if [ "${APP_MUTATION_STARTED:-false}" = true ] && [ "$result" -ne 0 ]; then
+    printf 'Update stopped after the backup checkpoint. Site data may have changed; do not roll back the image alone. Backup: %s\n' "$backup_dir" >&2
+    printf 'Inspect Docker logs and restore the matching backup in an isolated project before deciding recovery.\n' >&2
+  fi
+  [ -z "${APP_LOCK_DIR:-}" ] || rmdir "$APP_LOCK_DIR" 2>/dev/null || :
+}
+app_phase() {
+  [ -n "${APP_OPERATION_FILE:-}" ] || return 0
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >> "$APP_OPERATION_FILE"
+}
+
+app_apply() {
+  app_preflight
+  if [ -z "$NEW_APPS" ] && [ -z "$CHANGED_APPS" ]; then printf 'Site already matches the target app commits; no change made.\n'; return 0; fi
+  if [ "$YES" != true ]; then
+    [ -t 0 ] || fail 'app apply requires an interactive confirmation or --yes'
+    printf 'Type APPLY %s to continue: ' "$PROJECT_NAME" >&2
+    IFS= read -r confirmation || confirmation=''
+    [ "$confirmation" = "APPLY $PROJECT_NAME" ] || fail 'app update cancelled; no data was changed'
+  fi
+  mkdir -p "$ROOT_DIR/.frappeup/locks"
+  APP_LOCK_DIR="$ROOT_DIR/.frappeup/locks/$PROJECT_NAME.lock"
+  mkdir "$APP_LOCK_DIR" 2>/dev/null || fail "another app update may be active: $APP_LOCK_DIR"
+  APP_MUTATION_STARTED=false
+  APP_SERVICES_PAUSED=false
+  APP_MIGRATION_STARTED=false
+  trap 'app_apply_cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  umask 077
+  mkdir -p "$CURRENT_WORKSPACE/.frappeup-operations"
+  APP_OPERATION_FILE="$CURRENT_WORKSPACE/.frappeup-operations/update-$(date -u '+%Y%m%d_%H%M%S')-$$.log"
+  app_phase acquired
+  cp "$CURRENT_WORKSPACE/credentials.env" "$WORKSPACE_DIR/credentials.env"
+  build_runtime_image
+  for endpoint_key in HTTP_PUBLISH_PORT NGINX_LISTEN_PORT; do
+    endpoint_value=$(sed -n "s/^${endpoint_key}=//p" "$current_runtime_env")
+    if [ -n "$endpoint_value" ]; then printf '%s=%s\n' "$endpoint_key" "$endpoint_value" >> "$runtime/.frappeup.env"; fi
+  done
+  image_id=$(docker image inspect --format '{{.Id}}' "$image:$tag") || fail 'built image is unavailable'
+  app_phase "built $image_id"
+  compose_at "$WORKSPACE_DIR" config -q
+  APP_SERVICES_PAUSED=true
+  compose_at "$CURRENT_WORKSPACE" stop frontend websocket queue-short queue-long scheduler
+  app_phase writes_paused
+  backup_site "$CURRENT_WORKSPACE" update
+  app_phase "backup $backup_dir"
+  printf 'Backup checkpoint: %s\n' "$backup_dir"
+  log_event "app.update.backup $PROJECT_NAME $backup_dir"
+  APP_MUTATION_STARTED=true
+  compose_at "$CURRENT_WORKSPACE" stop backend
+  app_phase services_stopped
+  migration_script='set -e; ls -1 apps > sites/apps.txt;'
+  for app in $NEW_APPS; do migration_script="$migration_script bench --site $SITE_NAME install-app $app;"; done
+  migration_script="$migration_script bench --site $SITE_NAME migrate;"
+  APP_MIGRATION_STARTED=true
+  compose_at "$WORKSPACE_DIR" run --rm --no-deps backend bash -lc "$migration_script"
+  app_phase migrated
+  compose_at "$WORKSPACE_DIR" up -d --no-deps backend websocket queue-short queue-long scheduler frontend
+  app_phase services_started
+  for service in backend websocket queue-short queue-long scheduler frontend; do
+    attempt=0
+    while [ -z "$(compose_at "$WORKSPACE_DIR" ps --status running -q "$service" 2>/dev/null)" ]; do
+      attempt=$((attempt+1)); [ "$attempt" -lt 30 ] || fail "$service did not become running"
+      sleep 2
+    done
+  done
+  verified=$(compose_at "$WORKSPACE_DIR" exec -T backend bench --site "$SITE_NAME" list-apps) || fail 'updated site inventory is unavailable'
+  for app in $desired_names; do printf '%s\n' "$verified" | awk '{print $1}' | grep -Fx "$app" >/dev/null || fail "updated site lacks app $app"; done
+  compose_at "$WORKSPACE_DIR" exec -T backend python -c 'import requests,sys; r=requests.get("http://frontend:8080",headers={"Host":sys.argv[1]},timeout=30); print("HTTP",r.status_code); sys.exit(0 if r.status_code in (200,302,303) else 1)' "$SITE_NAME" || fail 'updated site HTTP health check failed'
+  APP_MUTATION_STARTED=false
+  APP_SERVICES_PAUSED=false
+  app_phase verified
+  log_event "app.update.completed $PROJECT_NAME $image_id"
+  printf 'Updated %s with image %s:%s; data volumes were preserved.\nBackup: %s\nOperation log: %s\n' "$SITE_NAME" "$image" "$tag" "$backup_dir" "$APP_OPERATION_FILE"
+}
+
+app_command() {
+  [ "$#" -gt 0 ] || fail 'usage: frappeup app prepare|plan|apply --current-env-file CURRENT --env-file TARGET'
+  action=$1; shift; parse_common "$@"
+  case "$action" in prepare) app_prepare;; plan) app_preflight;; apply) app_apply;; *) fail 'usage: frappeup app prepare|plan|apply --current-env-file CURRENT --env-file TARGET';; esac
+}
+backup_command() {
+  load_profile
+  doctor_check
+  backup_site "$WORKSPACE_DIR" manual
+  log_event "backup.completed $PROJECT_NAME $backup_dir"
+  printf 'Backup: %s\n' "$backup_dir"
+}
+backup_verify() {
+  [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] || fail '--backup-dir must name an existing backup directory'
+  BACKUP_DIR=$(CDPATH= cd -- "$BACKUP_DIR" && pwd -P)
+  [ -r "$BACKUP_DIR/manifest.env" ] && [ -r "$BACKUP_DIR/SHA256SUMS" ] || fail 'backup manifest or checksums are missing'
+  count=0
+  while read -r expected filename; do
+    case "$expected" in *[!0-9a-f]*|'') fail 'invalid backup checksum';; esac
+    [ "${#expected}" -eq 64 ] || fail 'invalid backup checksum'
+    case "$filename" in ''|*/*|*'..'*) fail 'invalid backup artifact name';; esac
+    [ -f "$BACKUP_DIR/$filename" ] || fail "backup artifact is missing: $filename"
+    [ "$(sha256 < "$BACKUP_DIR/$filename")" = "$expected" ] || fail "backup checksum mismatch: $filename"
+    count=$((count+1))
+  done < "$BACKUP_DIR/SHA256SUMS"
+  [ "$count" -eq 4 ] || fail 'backup must contain four checksummed artifacts'
+  database_archive=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*-database*.sql.gz' -print -quit)
+  public_archive=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*-files.tgz' ! -name '*-private-files.tgz' -print -quit)
+  private_archive=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*-private-files.tgz' -print -quit)
+  config_backup=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*-site_config_backup.json' -print -quit)
+  [ -n "$database_archive" ] && [ -n "$public_archive" ] && [ -n "$private_archive" ] && [ -n "$config_backup" ] || fail 'backup archive set is incomplete'
+  gzip -t "$database_archive" && tar -tzf "$public_archive" >/dev/null && tar -tzf "$private_archive" >/dev/null || fail 'backup archive integrity check failed'
+  printf 'PASS backup checksums and archive integrity: %s\n' "$BACKUP_DIR"
+}
+backup_manifest_field() {
+  field=$1
+  sed -n "s/^${field}='\([^']*\)'$/\1/p" "$BACKUP_DIR/manifest.env"
+}
+restore_cleanup() {
+  result=$?
+  if [ "${RESTORE_STARTED:-false}" = true ] && [ "$result" -ne 0 ]; then
+    printf 'Restore stopped after changing the project. Inspect operation log and Docker logs; do not start an unverified image.\n' >&2
+  fi
+  [ -z "${RESTORE_LOCK_DIR:-}" ] || rmdir "$RESTORE_LOCK_DIR" 2>/dev/null || :
+}
+restore_command() {
+  load_profile; build_plan; backup_verify
+  [ "$PROFILE" = development ] || fail 'restore currently supports development profiles only'
+  [ "$(backup_manifest_field BACKUP_PROJECT)" = "$PROJECT_NAME" ] && [ "$(backup_manifest_field BACKUP_SITE)" = "$SITE_NAME" ] || fail 'backup belongs to a different project or site'
+  if [ -r "$WORKSPACE_DIR/runtime/.frappeup.env" ]; then runtime_env="$WORKSPACE_DIR/runtime/.frappeup.env"; else runtime_env="$WORKSPACE_DIR/runtime/.frappe1tap.env"; fi
+  [ -r "$runtime_env" ] && [ -r "$WORKSPACE_DIR/credentials.env" ] || fail 'restore workspace is incomplete'
+  restore_image="$(sed -n 's/^CUSTOM_IMAGE=//p' "$runtime_env"):$(sed -n 's/^CUSTOM_TAG=//p' "$runtime_env")"
+  [ "$(backup_manifest_field BACKUP_IMAGE)" = "$restore_image" ] || fail 'backup image does not match restore profile; use the profile and image from the backup checkpoint'
+  doctor_check
+  docker image inspect "$restore_image" >/dev/null 2>&1 || fail "restore image is unavailable: $restore_image"
+  project_resources || fail 'Docker project has no existing state to restore'
+  printf '%s\n' "$volume_names" | grep -Fx "${PROJECT_NAME}_sites" >/dev/null || fail 'site volume is missing; refusing to create a new site during restore'
+  if [ "$YES" != true ]; then
+    [ -t 0 ] || fail 'restore requires an interactive confirmation or --yes'
+    printf 'Type RESTORE %s to overwrite site data from %s: ' "$PROJECT_NAME" "$BACKUP_DIR" >&2
+    IFS= read -r confirmation || confirmation=''
+    [ "$confirmation" = "RESTORE $PROJECT_NAME" ] || fail 'restore cancelled; no data was changed'
+  fi
+  mkdir -p "$ROOT_DIR/.frappeup/locks"
+  RESTORE_LOCK_DIR="$ROOT_DIR/.frappeup/locks/$PROJECT_NAME.lock"
+  mkdir "$RESTORE_LOCK_DIR" 2>/dev/null || fail "another operation may be active: $RESTORE_LOCK_DIR"
+  RESTORE_STARTED=false
+  trap 'restore_cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  umask 077
+  restore_override="$WORKSPACE_DIR/frappeup.restore.yaml"
+  cat > "$restore_override" <<'RESTORE_YAML'
+services:
+  backend:
+    environment:
+      FRAPPEUP_DB_PASSWORD: ${DB_PASSWORD}
+RESTORE_YAML
+  compose_at "$WORKSPACE_DIR" config -q
+  RESTORE_STARTED=true
+  compose_at "$WORKSPACE_DIR" stop frontend backend websocket queue-short queue-long scheduler
+  compose_at "$WORKSPACE_DIR" up -d db redis-cache redis-queue
+  restore_script="set -e; ls -1 apps > sites/apps.txt; bench --site $SITE_NAME restore /restore/$(basename -- "$database_archive") --with-public-files /restore/$(basename -- "$public_archive") --with-private-files /restore/$(basename -- "$private_archive") --db-root-password=\$FRAPPEUP_DB_PASSWORD --force"
+  COMPOSE_EXTRA_FILE="$restore_override" compose_at "$WORKSPACE_DIR" run --rm --no-deps -v "$BACKUP_DIR:/restore:ro" backend bash -lc "$restore_script"
+  compose_at "$WORKSPACE_DIR" up -d --no-deps backend websocket queue-short queue-long scheduler frontend
+  verified=$(compose_at "$WORKSPACE_DIR" exec -T backend bench --site "$SITE_NAME" list-apps) || fail 'restored site inventory is unavailable'
+  for id in $PLAN_APPS; do app=$(app_field "$id" APP_NAME); printf '%s\n' "$verified" | awk '{print $1}' | grep -Fx "$app" >/dev/null || fail "restored site lacks app $app"; done
+  compose_at "$WORKSPACE_DIR" exec -T backend python -c 'import requests,sys; r=requests.get("http://frontend:8080",headers={"Host":sys.argv[1]},timeout=30); print("HTTP",r.status_code); sys.exit(0 if r.status_code in (200,302,303) else 1)' "$SITE_NAME" || fail 'restored site HTTP health check failed'
+  RESTORE_STARTED=false
+  log_event "restore.completed $PROJECT_NAME $BACKUP_DIR"
+  printf 'Restored %s from %s with %s\n' "$SITE_NAME" "$BACKUP_DIR" "$restore_image"
 }
 
 doctor_check() {
@@ -474,6 +797,9 @@ case "$command" in
   lock) parse_common "$@"; lock_command ;;
   workspace) parse_common "$@"; workspace_command ;;
   install) parse_common "$@"; install_command ;;
+  app) app_command "$@" ;;
+  backup) if [ "${1:-}" = verify ]; then shift; parse_common "$@"; backup_verify; else parse_common "$@"; backup_command; fi ;;
+  restore) parse_common "$@"; restore_command ;;
   credentials) parse_common "$@"; credentials_command ;;
   status) parse_common "$@"; status_command ;;
   logs) parse_common "$@"; logs_command ;;

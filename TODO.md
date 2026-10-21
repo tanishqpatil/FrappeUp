@@ -11,6 +11,9 @@
 - [x] Guard interactive reset with exported backup and exact confirmation.
 - [x] Rename CLI and documentation to FrappeUp.
 - [x] Verify a disposable reset and independent restore end to end.
-- [ ] Add an app install/update migration flow that retains data and verifies health.
+- [x] Add a development app install/update migration flow that retains data and verifies health; verify an additive app installation on a disposable site.
+- [x] Add standalone backup, checksum verification, and explicit restore for an existing development site; verify an update checkpoint can restore the prior app inventory and data.
+- [ ] Test same-major app version updates and failed migrations in disposable projects.
+- [ ] Add automated recovery, off-host backups, and cross-host restore drills.
 - [ ] Windows end-to-end Docker verification.
 - [ ] Production installation, backup/restore, monitoring, update, and destroy.
