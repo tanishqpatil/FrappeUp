@@ -53,7 +53,7 @@ The [official app catalog](catalog/official-apps.env) supplies repositories, def
 
 For apps outside the catalog, use [custom app definitions](profiles/custom-apps.env.example) through `CUSTOM_APPS_FILE`. Treat profile and custom app files as trusted local scripts. The catalog is a starting point, not a compatibility guarantee for every version combination.
 
-The only implemented install profile is **development**. Production may be planned and locked but cannot yet be installed. See the [architecture](docs/ARCHITECTURE.md), [data lifecycle](docs/DATA_LIFECYCLE_PLAN.md), [roadmap](TODO.md), and [contributing guide](CONTRIBUTING.md).
+The only implemented install profile is **development**. Production may be planned and locked but cannot yet be installed. See the [architecture](docs/ARCHITECTURE.md), [data lifecycle](docs/DATA_LIFECYCLE_PLAN.md), [existing tools](docs/ECOSYSTEM.md), [roadmap](TODO.md), and [contributing guide](CONTRIBUTING.md).
 
 ## Releases
 

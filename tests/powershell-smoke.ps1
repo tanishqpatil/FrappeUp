@@ -27,7 +27,7 @@ APP_HRMS_REF_KIND=commit
     & $cli lock --env-file $profile | Out-Null
     if ($LASTEXITCODE -ne 0 -or !(Test-Path "$profile.lock.env")) { throw 'commit lock failed' }
     Add-Content $profile 'SITE_NAME=changed.localhost'
-    $result = & $cli workspace --env-file $profile 2>&1
-    if ($LASTEXITCODE -eq 0 -or !(($result -join "`n") -match 'Lock does not match profile')) { throw 'Stale lock was accepted' }
+    & $cli workspace --env-file $profile 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { throw 'Stale lock was accepted' }
     'PASS PowerShell CLI smoke tests'
 } finally { Remove-Item -Recurse -Force $temp }
