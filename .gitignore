@@ -111,3 +111,10 @@ Thumbs.db
 # ERPNext/Bench specific
 sites/
 node_modules/
+
+# Frappe 1-Tap CLI
+dist/
+*.env
+!profiles/*.env.example
+*.env.lock.json
+.frappe1tap/

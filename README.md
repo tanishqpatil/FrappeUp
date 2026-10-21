@@ -1,73 +1,61 @@
 # Frappe 1-Tap Install
 
-This project provides a simple one-tap installation for a Frappe/ERPNext environment using Docker.
+A local, Docker-based CLI for creating reproducible Frappe environments. Users need no server, dashboard, Go, Python, Node, Bench, or Frappe installation before using a released binary.
 
-## Overview
+## Current foundation
 
-This setup simplifies the process of getting a Frappe instance up and running. It uses Docker and Docker Compose to create and manage the necessary containers for the Frappe framework, including the database and other services.
+The CLI can create separate development and production profile files, list supported official Frappe product apps, produce a dependency-aware plan, lock every source commit, and materialize a deterministic Docker build workspace. Running Frappe containers and site creation are the next implementation stage.
 
-## Prerequisites
+After the first release, macOS and Linux users will run the shell launcher:
 
-Before you begin, ensure you have the following installed on your system:
-*   [Docker](https://docs.docker.com/get-docker/)
-*   [Docker Compose](https://docs.docker.com/compose/install/)
-
-## Installation and Usage
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/SwayAlgo/Frappe1TapInstall.git
-    cd Frappe1TapInstall
-    ```
-
-2.  **Run the initialization script:**
-    This script will set up the environment, pull the necessary Docker images, and start the services.
-    ```bash
-    ./init.sh
-    ```
-    Follow the on-screen prompts to complete the setup. Once the script finishes, your Frappe/ERPNext instance will be available at `http://localhost:8000`.
-
-## Automatic Restore on Startup
-
-The system is designed to be resilient against data loss. When you start the environment with `./init.sh` or `docker-compose up`:
-
-1.  It will check for any existing backups in the `persistent/backups/` directory.
-2.  If backups are found, it will automatically restore the **most recent** one.
-3.  If no backups are found, it will perform a fresh installation of Frappe/ERPNext.
-
-## Stopping the Environment and Data Safety
-
-To ensure your data is backed up before you stop the containers, **do not use `docker-compose down` directly**. Instead, use the provided shutdown script:
-
-```bash
-./shutdown.sh
+```sh
+curl -fsSL https://raw.githubusercontent.com/SwayAlgo/Frappe1TapInstall/main/install.sh | sh
+frappe1tap init --profile development --env-file development.env
+frappe1tap plan --env-file development.env
 ```
 
-This script will:
-1.  Create a final, up-to-the-minute backup of your site.
-2.  Safely stop and remove the Docker containers.
+The launcher downloads a checksum-verified native binary. Passing command arguments to `install.sh`, `install.ps1`, or `install.bat` installs the binary and then runs that command. A source checkout uses Go to build locally because release artifacts are not stored in Git.
 
-The `backup` service also runs in the background to create a full backup automatically every week. All backups are stored in the `persistent/backups/` directory on your host machine.
+## Profiles and apps
 
-## Manual Restore
+Start from [development.env.example](profiles/development.env.example) or [production.env.example](profiles/production.env.example). Set `INSTALL_APPS` to official catalog IDs. Dependency apps are resolved automatically and appear before apps that require them.
 
-If you need to manually restore a specific backup file:
+For a third-party app, set `CUSTOM_APPS_FILE` and use [custom-apps.json.example](profiles/custom-apps.json.example). The custom definition supplies its Git URL, tag/branch/commit, Frappe app name, and any known dependencies.
 
-1.  Place your backup file (e.g., `my_backup.sql.gz`) into the `persistent/backups/` directory.
-2.  Run the restore script, passing the filename as an argument:
-    
-    ```bash
-    docker-compose exec frappe bash /workspace/restore.sh my_backup.sql.gz
-    ```
+Production plans identify moving refs and will require a commit lock before installation. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-The script will handle restoring both the database and the associated site files.
+## Locked workspace
 
-## Included Files
+Create a lock, then materialize it. The workspace contains the locked Frappe Docker runtime context, Frappe and app sources, a generated custom Containerfile, and private generated administrator credentials. It does not start any Docker containers.
 
-*   `docker-compose.yml`: Defines the services, networks, and volumes for the Docker application.
-*   `Dockerfile`: Contains the instructions to build the custom Frappe Docker image.
-*   `init.sh`: The main script to initialize the Frappe environment.
-*   `backup.sh`: A script to perform backups of the Frappe sites.
-*   `restore.sh`: A script to manually restore a site from a backup.
-*   `shutdown.sh`: The recommended script to safely stop the environment and create a final backup.
-*   `.dockerignore`: Specifies files and directories to be excluded from the Docker build context.
+```sh
+frappe1tap lock --env-file production.env --force
+frappe1tap workspace --env-file production.env
+```
+
+`workspace` refuses a stale lock and refuses to replace an existing workspace unless `--force` is supplied. It uses `FRAPPE_DOCKER_REPOSITORY` and `FRAPPE_DOCKER_REF` from the profile, defaulting to the official `frappe/frappe_docker` repository and `main`.
+
+## Logs
+
+Each profile writes append-only JSON logs to `.frappe1tap/logs/cli.jsonl` beside its `.env` file. Logs record command events and errors without writing profile values; embedded Git URL credentials and common token query parameters are redacted before errors are written.
+
+```sh
+frappe1tap logs --env-file production.env
+frappe1tap logs --env-file production.env --follow
+```
+
+## Docker readiness
+
+Run this before creating an environment. It checks the Docker CLI, Docker Compose, Buildx, and Docker daemon, then explains how to fix any failed prerequisite.
+
+```sh
+frappe1tap doctor --env-file production.env
+```
+
+## Legacy files
+
+The original DIY Docker scripts are preserved in [legacy](legacy/README.md). They are no longer part of the active implementation.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

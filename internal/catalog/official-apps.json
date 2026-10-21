@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-21",
+  "apps": [
+    {"id":"erpnext","display_name":"ERPNext","publisher":"frappe","repository":"https://github.com/frappe/erpnext","ref":"version-16","ref_kind":"branch","app_name":"erpnext","supported_frappe_majors":[16],"requires":[]},
+    {"id":"hrms","display_name":"HRMS","publisher":"frappe","repository":"https://github.com/frappe/hrms","ref":"version-16","ref_kind":"branch","app_name":"hrms","supported_frappe_majors":[16],"requires":["erpnext"]},
+    {"id":"crm","display_name":"Frappe CRM","publisher":"frappe","repository":"https://github.com/frappe/crm","ref":"v1.88.0","ref_kind":"tag","app_name":"crm","supported_frappe_majors":[15,16],"requires":[]},
+    {"id":"payments","display_name":"Frappe Payments","publisher":"frappe","repository":"https://github.com/frappe/payments","ref":"version-16","ref_kind":"branch","app_name":"payments","supported_frappe_majors":[16],"requires":[]},
+    {"id":"webshop","display_name":"Webshop","publisher":"frappe","repository":"https://github.com/frappe/webshop","ref":"version-16","ref_kind":"branch","app_name":"webshop","supported_frappe_majors":[16],"requires":["erpnext","payments"]},
+    {"id":"telephony","display_name":"Frappe Telephony","publisher":"frappe","repository":"https://github.com/frappe/telephony","ref":"develop","ref_kind":"branch","app_name":"telephony","supported_frappe_majors":[16],"requires":[]},
+    {"id":"helpdesk","display_name":"Frappe Helpdesk","publisher":"frappe","repository":"https://github.com/frappe/helpdesk","ref":"v1.31.0","ref_kind":"tag","app_name":"helpdesk","supported_frappe_majors":[15,16],"requires":["telephony"]},
+    {"id":"lms","display_name":"Frappe LMS","publisher":"frappe","repository":"https://github.com/frappe/lms","ref":"v2.66.0","ref_kind":"tag","app_name":"lms","supported_frappe_majors":[15,16],"requires":["payments"]},
+    {"id":"builder","display_name":"Frappe Builder","publisher":"frappe","repository":"https://github.com/frappe/builder","ref":"v1.35.1","ref_kind":"tag","app_name":"builder","supported_frappe_majors":[15,16],"requires":[]},
+    {"id":"insights","display_name":"Frappe Insights","publisher":"frappe","repository":"https://github.com/frappe/insights","ref":"v3.15.1","ref_kind":"tag","app_name":"insights","supported_frappe_majors":[15,16],"requires":[]},
+    {"id":"wiki","display_name":"Frappe Wiki","publisher":"frappe","repository":"https://github.com/frappe/wiki","ref":"v3.4.0","ref_kind":"tag","app_name":"wiki","supported_frappe_majors":[15,16],"requires":[]},
+    {"id":"education","display_name":"Frappe Education","publisher":"frappe","repository":"https://github.com/frappe/education","ref":"v16.1.0","ref_kind":"tag","app_name":"education","supported_frappe_majors":[16],"requires":["erpnext"]},
+    {"id":"lending","display_name":"Frappe Lending","publisher":"frappe","repository":"https://github.com/frappe/lending","ref":"v16.6.2","ref_kind":"tag","app_name":"lending","supported_frappe_majors":[16],"requires":["erpnext"]},
+    {"id":"raven","display_name":"Raven","publisher":"frappe","repository":"https://github.com/frappe/raven","ref":"v3.0.0","ref_kind":"tag","app_name":"raven","supported_frappe_majors":[15,16],"requires":[]},
+    {"id":"india_payroll","display_name":"India Payroll","publisher":"frappe","repository":"https://github.com/frappe/india_payroll","ref":"v16.1.0","ref_kind":"tag","app_name":"india_payroll","supported_frappe_majors":[16],"requires":["erpnext","hrms"]},
+    {"id":"whatsapp","display_name":"Frappe WhatsApp","publisher":"frappe","repository":"https://github.com/frappe/whatsapp","ref":"v1.1.1","ref_kind":"tag","app_name":"whatsapp","supported_frappe_majors":[16],"requires":[]},
+    {"id":"erpnext_shipping","display_name":"ERPNext Shipping","publisher":"frappe","repository":"https://github.com/frappe/erpnext_shipping","ref":"v16.0.2","ref_kind":"tag","app_name":"erpnext_shipping","supported_frappe_majors":[16],"requires":["erpnext"]},
+    {"id":"ecommerce_integrations","display_name":"Ecommerce Integrations","publisher":"frappe","repository":"https://github.com/frappe/ecommerce_integrations","ref":"v16.0.0","ref_kind":"tag","app_name":"ecommerce_integrations","supported_frappe_majors":[16],"requires":["erpnext"]},
+    {"id":"gameplan","display_name":"Gameplan","publisher":"frappe","repository":"https://github.com/frappe/gameplan","ref":"develop","ref_kind":"branch","app_name":"gameplan","supported_frappe_majors":[16],"requires":[],"notes":"Official project uses develop for Frappe v16."},
+    {"id":"print_designer","display_name":"Print Designer","publisher":"frappe","repository":"https://github.com/frappe/print_designer","ref":"v1.6.7","ref_kind":"tag","app_name":"print_designer","supported_frappe_majors":[15,16],"requires":[],"notes":"Frappe v16 includes built-in print designer; test before choosing this app."}
+  ]
+}
