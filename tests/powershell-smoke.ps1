@@ -31,3 +31,4 @@ APP_HRMS_REF_KIND=commit
     if ($LASTEXITCODE -eq 0) { throw 'Stale lock was accepted' }
     'PASS PowerShell CLI smoke tests'
 } finally { Remove-Item -Recurse -Force $temp }
+exit 0
