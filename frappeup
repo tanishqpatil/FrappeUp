@@ -14,7 +14,7 @@ CATALOG_FILE="$ROOT_DIR/catalog/official-apps.env"
 # shellcheck source=catalog/official-apps.env
 . "$CATALOG_FILE"
 
-VERSION='0.3.0'
+VERSION='0.3.1'
 ENV_FILE=''
 LOCK_FILE=''
 FORCE=false
@@ -266,21 +266,27 @@ choose_existing_action() {
 }
 
 backup_before_reset() {
-  backend_id=$(docker compose -p "$PROJECT_NAME" ps -q backend 2>/dev/null) || backend_id=''
+  backend_id=$(compose_runtime ps -q backend 2>/dev/null) || backend_id=''
   [ -n "$backend_id" ] || fail 'reset requires a running backend to create a verified backup; no data was changed'
-  docker compose -p "$PROJECT_NAME" exec -T backend bench --site "$SITE_NAME" list-apps >/dev/null || fail "site $SITE_NAME is not available for backup; no data was changed"
+  compose_runtime exec -T backend bench --site "$SITE_NAME" list-apps >/dev/null || fail "site $SITE_NAME is not available for backup; no data was changed"
   stamp=$(date -u '+%Y%m%d_%H%M%S')
   backup_dir="$ENV_DIR/.frappeup/backups/$PROJECT_NAME/$stamp-$$"
-  container_backup="/home/frappe/frappe-bench/sites/$SITE_NAME/private/backups/frappeup-reset-$stamp-$$"
+  # Frappe expects private/backups to contain files only; a directory there
+  # makes its next backup fail in delete_temp_backups().
+  container_backup="/home/frappe/frappe-bench/sites/.frappeup-backups/$SITE_NAME/reset-$stamp-$$"
   umask 077
   mkdir -p "$backup_dir"
-  docker compose -p "$PROJECT_NAME" exec -T backend bench --site "$SITE_NAME" backup --with-files --compress --backup-path "$container_backup" || fail "backup failed; no data was changed (partial files: $backup_dir)"
+  compose_runtime exec -T backend bench --site "$SITE_NAME" backup --with-files --compress --backup-path "$container_backup" || fail "backup failed; no data was changed (partial files: $backup_dir)"
   docker cp "$backend_id:$container_backup/." "$backup_dir" || fail "backup export failed; no data was changed (partial files: $backup_dir)"
-  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-database*.sql.gz' -size +0c -print -quit)" ] || fail 'database backup is missing; no data was changed'
-  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-files.tgz' ! -name '*-private-files.tgz' -size +0c -print -quit)" ] || fail 'public files backup is missing; no data was changed'
-  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-private-files.tgz' -size +0c -print -quit)" ] || fail 'private files backup is missing; no data was changed'
-  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-site_config_backup.json' -size +0c -print -quit)" ] || fail 'site configuration backup is missing; no data was changed'
-  printf 'Verified backup: %s\n' "$backup_dir"
+  database_archive=$(find "$backup_dir" -maxdepth 1 -type f -name '*-database*.sql.gz' -size +0c -print -quit)
+  public_archive=$(find "$backup_dir" -maxdepth 1 -type f -name '*-files.tgz' ! -name '*-private-files.tgz' -size +0c -print -quit)
+  private_archive=$(find "$backup_dir" -maxdepth 1 -type f -name '*-private-files.tgz' -size +0c -print -quit)
+  config_backup=$(find "$backup_dir" -maxdepth 1 -type f -name '*-site_config_backup.json' -size +0c -print -quit)
+  [ -n "$database_archive" ] && [ -n "$public_archive" ] && [ -n "$private_archive" ] && [ -n "$config_backup" ] || fail 'backup is incomplete; no data was changed'
+  gzip -t "$database_archive" || fail 'database archive is corrupt; no data was changed'
+  tar -tzf "$public_archive" >/dev/null || fail 'public files archive is corrupt; no data was changed'
+  tar -tzf "$private_archive" >/dev/null || fail 'private files archive is corrupt; no data was changed'
+  printf 'Validated backup archives: %s\n' "$backup_dir"
 }
 
 reset_project() {
@@ -294,12 +300,12 @@ reset_project() {
 }
 
 site_exists() {
-  backend_id=$(docker compose -p "$PROJECT_NAME" ps -q backend 2>/dev/null) || return 1
+  backend_id=$(compose_runtime ps -q backend 2>/dev/null) || return 1
   [ -n "$backend_id" ] || return 1
   expected_image="frappeup/$PROJECT_NAME:$(printf '%s' "$LOCK_PLAN_SHA256" | cut -c1-12)"
   actual_image=$(docker inspect --format '{{.Config.Image}}' "$backend_id" 2>/dev/null) || return 1
   [ "$actual_image" = "$expected_image" ] || fail "project $PROJECT_NAME runs a different locked image; use a new PROJECT_NAME"
-  installed=$(docker compose -p "$PROJECT_NAME" exec -T backend bench --site "$SITE_NAME" list-apps 2>/dev/null) || return 1
+  installed=$(compose_runtime exec -T backend bench --site "$SITE_NAME" list-apps 2>/dev/null) || return 1
   for id in $PLAN_APPS; do app=$(app_field "$id" APP_NAME); printf '%s\n' "$installed" | awk '{print $1}' | grep -Fx "$app" >/dev/null || fail "site $SITE_NAME already exists without required app $app; refusing to replace it"; done
   return 0
 }
@@ -441,12 +447,13 @@ lock_command() {
   log_event 'lock.completed'; printf 'Created %s\n' "$LOCK_FILE"
 }
 
-status_command() { load_profile; docker compose -p "$PROJECT_NAME" ps; }
+status_command() { load_profile; runtime="$WORKSPACE_DIR/runtime"; compose_runtime ps; }
 logs_command() {
   load_profile
   if [ "$DOCKER_LOGS" = true ]; then
-    if [ "$FOLLOW" = true ]; then docker compose -p "$PROJECT_NAME" logs --tail "$LINES" --follow
-    else docker compose -p "$PROJECT_NAME" logs --tail "$LINES"; fi
+    runtime="$WORKSPACE_DIR/runtime"
+    if [ "$FOLLOW" = true ]; then compose_runtime logs --tail "$LINES" --follow
+    else compose_runtime logs --tail "$LINES"; fi
   else
     logfile="$LOG_DIR/cli.log"
     [ -r "$logfile" ] || return 0

@@ -23,7 +23,7 @@ if "$ROOT/frappeup" workspace --env-file "$TEMP/test.env" >"$TEMP/install.out" 2
 fi
 grep -q 'lock file does not match profile' "$TEMP/install.out"
 FRAPPEUP_INSTALL_DIR="$TEMP/bin" "$ROOT/install.sh" version > "$TEMP/bootstrap.out"
-grep -q '0.3.0' "$TEMP/bootstrap.out"
+grep -q '0.3.1' "$TEMP/bootstrap.out"
 "$TEMP/bin/frappeup" catalog list > "$TEMP/catalog.out"
 grep -q 'ERPNext' "$TEMP/catalog.out"
 
@@ -38,11 +38,15 @@ case "$1 $2" in
   'volume ls')
     case " $* " in *' -q '*) printf 'existing-volume\n';; *) printf '  volume: existing-volume\n';; esac ;;
   'ps -a') printf '  container: existing-backend (Exited)\n' ;;
-  *) printf 'unexpected Docker operation: %s\n' "$*" >&2; exit 90 ;;
+  *) case " $* " in *' ps '*|*' logs '*) printf 'mock\n';; *) printf 'unexpected Docker operation: %s\n' "$*" >&2; exit 90;; esac ;;
 esac
 DOCKER
 chmod +x "$TEMP/bin/docker"
 MOCK_DOCKER_LOG="$TEMP/docker.log" PATH="$TEMP/bin:$PATH" "$ROOT/frappeup" install --env-file "$TEMP/test.env" --existing keep > "$TEMP/keep.out"
 grep -q 'Keeping existing data' "$TEMP/keep.out"
 if grep -E 'buildx build|compose .* (up|down|exec)|new-site|backup' "$TEMP/docker.log" >/dev/null; then echo 'keep modified an existing project' >&2; exit 1; fi
+MOCK_DOCKER_LOG="$TEMP/docker-read.log" PATH="$TEMP/bin:$PATH" "$ROOT/frappeup" status --env-file "$TEMP/test.env" >/dev/null
+MOCK_DOCKER_LOG="$TEMP/docker-read.log" PATH="$TEMP/bin:$PATH" "$ROOT/frappeup" logs --env-file "$TEMP/test.env" --docker --lines 1 >/dev/null
+grep -E 'compose .* -f .*compose.yaml .* ps$' "$TEMP/docker-read.log" >/dev/null
+grep -E 'compose .* -f .*compose.yaml .* logs --tail 1$' "$TEMP/docker-read.log" >/dev/null
 echo 'PASS script CLI smoke tests'

@@ -10,7 +10,7 @@
 - [x] Detect existing project volumes and default to preserving the site.
 - [x] Guard interactive reset with exported backup and exact confirmation.
 - [x] Rename CLI and documentation to FrappeUp.
-- [ ] Verify a disposable reset and independent restore end to end.
+- [x] Verify a disposable reset and independent restore end to end.
 - [ ] Add an app install/update migration flow that retains data and verifies health.
 - [ ] Windows end-to-end Docker verification.
 - [ ] Production installation, backup/restore, monitoring, update, and destroy.

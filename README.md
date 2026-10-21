@@ -36,7 +36,7 @@ On Windows, run `install.bat` or `install.ps1` from the checkout, then use `frap
 
 A repeat install detects Docker containers **and volumes** for the project before validating a lock or building an image. An interactive terminal offers **Keep** (default) or **Reset**. Keep exits without changing the deployment or database. In scripts, `--existing keep` is explicit; without a terminal, keep is the default.
 
-Reset requires a running site, exports database, public/private files, and site configuration outside Docker, checks the files, and then requires `RESET <project-name>` before removing that project's Compose volumes. Verify a backup by restoring it independently before relying on it. Do not use reset to update apps.
+Reset requires a running site, exports database, public/private files, and site configuration outside Docker, checks archive integrity, and then requires `RESET <project-name>` before removing that project's Compose volumes. A disposable reset and restore drill is recorded in the [data lifecycle notes](docs/DATA_LIFECYCLE_PLAN.md). Verify recovery with your own data before relying on reset. Do not use reset to update apps.
 
 Changing `INSTALL_APPS` or a ref does **not yet** migrate an existing site. FrappeUp keeps it unchanged; migration is a separate future command. This development setup does not promise zero downtime.
 
@@ -57,7 +57,7 @@ The only implemented install profile is **development**. Production may be plann
 
 ## Releases
 
-The [v0.3.0 release](https://github.com/tanishqpatil/FrappeUp/releases/tag/v0.3.0) contains checksum-verified shell and PowerShell bundles. On macOS or Linux, install without cloning:
+The [latest release](https://github.com/tanishqpatil/FrappeUp/releases/latest) contains checksum-verified shell and PowerShell bundles. On macOS or Linux, install without cloning:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tanishqpatil/FrappeUp/master/install.sh | sh

@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptRoot = Split-Path -Parent $PSCommandPath
 if (Test-Path (Join-Path $ScriptRoot 'catalog\official-apps.env')) { $Root = $ScriptRoot } else { $Root = Split-Path -Parent $ScriptRoot }
 $CatalogPath = Join-Path $Root 'catalog\official-apps.env'
-$Version = '0.3.0'
+$Version = '0.3.1'
 
 function Fail([string]$Message) { throw $Message }
 function Read-Env([string]$Path) {
@@ -151,12 +151,13 @@ function Log([string]$Event) {
     Add-Content (Join-Path $LogDir 'cli.log') "$(Get-Date -Format o) $Event"
 }
 function Existing-Site {
-    $backend=& docker compose -p $Profile['PROJECT_NAME'] ps -q backend 2>$null
+    $compose=Compose-Args
+    $backend=& docker compose @compose ps -q backend 2>$null
     if ($LASTEXITCODE -ne 0 -or !$backend) { return $false }
     $actual=& docker inspect --format '{{.Config.Image}}' $backend
     $expected="frappeup/$($Profile['PROJECT_NAME']):$($Lock['LOCK_PLAN_SHA256'].Substring(0,12))"
     if ($actual -ne $expected) { Fail 'Existing Docker project uses a different locked image; choose a new PROJECT_NAME' }
-    $installed=& docker compose -p $Profile['PROJECT_NAME'] exec -T backend bench --site $Profile['SITE_NAME'] list-apps 2>$null
+    $installed=& docker compose @compose exec -T backend bench --site $Profile['SITE_NAME'] list-apps 2>$null
     if ($LASTEXITCODE -ne 0) { return $false }
     foreach ($id in $Apps) {
         $name=App-Field $id 'APP_NAME'
@@ -189,25 +190,40 @@ function Choose-Existing($Options) {
     Fail 'Invalid choice; no changes made'
 }
 function Backup-Before-Reset {
-    $backend=& docker compose -p $Profile['PROJECT_NAME'] ps -q backend 2>$null
+    $compose=Compose-Args
+    $backend=& docker compose @compose ps -q backend 2>$null
     if ($LASTEXITCODE -ne 0 -or !$backend) { Fail 'Reset requires a running backend to create a verified backup; no data was changed' }
-    & docker compose -p $Profile['PROJECT_NAME'] exec -T backend bench --site $Profile['SITE_NAME'] list-apps *> $null
+    & docker compose @compose exec -T backend bench --site $Profile['SITE_NAME'] list-apps *> $null
     if ($LASTEXITCODE -ne 0) { Fail 'Site is unavailable for backup; no data was changed' }
     $stamp=(Get-Date).ToUniversalTime().ToString('yyyyMMdd_HHmmss')
     $envDir=Split-Path -Parent $EnvPath
     $script:BackupDir=Join-Path $envDir ".frappeup/backups/$($Profile['PROJECT_NAME'])/$stamp-$PID"
-    $containerBackup="/home/frappe/frappe-bench/sites/$($Profile['SITE_NAME'])/private/backups/frappeup-reset-$stamp-$PID"
+    # Frappe expects private/backups to contain files only.
+    $containerBackup="/home/frappe/frappe-bench/sites/.frappeup-backups/$($Profile['SITE_NAME'])/reset-$stamp-$PID"
     New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
-    & docker compose -p $Profile['PROJECT_NAME'] exec -T backend bench --site $Profile['SITE_NAME'] backup --with-files --compress --backup-path $containerBackup
+    & docker compose @compose exec -T backend bench --site $Profile['SITE_NAME'] backup --with-files --compress --backup-path $containerBackup
     if ($LASTEXITCODE -ne 0) { Fail "Backup failed; no data was changed (partial files: $BackupDir)" }
     & docker cp "${backend}:$containerBackup/." $BackupDir
     if ($LASTEXITCODE -ne 0) { Fail "Backup export failed; no data was changed (partial files: $BackupDir)" }
+    $archives=@{}
     foreach ($pattern in @('*-database*.sql.gz','*-files.tgz','*-private-files.tgz','*-site_config_backup.json')) {
         $files=@(Get-ChildItem -Path $BackupDir -File -Filter $pattern | Where-Object Length -gt 0)
         if ($pattern -eq '*-files.tgz') { $files=@($files | Where-Object Name -NotLike '*-private-files.tgz') }
         if (!$files.Count) { Fail "Backup is missing $pattern; no data was changed" }
+        $archives[$pattern]=$files[0]
     }
-    Write-Host "Verified backup: $BackupDir"
+    $database=[IO.File]::OpenRead($archives['*-database*.sql.gz'].FullName)
+    try {
+        $compressed=[IO.Compression.GzipStream]::new($database,[IO.Compression.CompressionMode]::Decompress)
+        try { $compressed.CopyTo([IO.Stream]::Null) } finally { $compressed.Dispose() }
+    } catch { Fail 'Database archive is corrupt; no data was changed' } finally { $database.Dispose() }
+    foreach ($pattern in @('*-files.tgz','*-private-files.tgz')) {
+        & tar -tzf $archives[$pattern].FullName *> $null
+        if ($LASTEXITCODE -ne 0) { Fail "$pattern archive is corrupt; no data was changed" }
+    }
+    try { Get-Content $archives['*-site_config_backup.json'].FullName -Raw | ConvertFrom-Json | Out-Null }
+    catch { Fail 'Site configuration backup is corrupt; no data was changed' }
+    Write-Host "Validated backup archives: $BackupDir"
 }
 function Reset-Project {
     Backup-Before-Reset | Out-Host
@@ -267,11 +283,11 @@ try {
         "Login: Administrator`nInitial password: $password"; exit 0
     }
     if ($command -eq 'doctor') { Doctor; Log 'doctor.completed'; exit 0 }
-    if ($command -eq 'status') { Run docker @('compose','-p',$Profile['PROJECT_NAME'],'ps'); exit 0 }
+    if ($command -eq 'status') { Run docker (@('compose')+(Compose-Args)+@('ps')); exit 0 }
     if ($command -eq 'logs') {
         $lines=if ($opts['--lines']) { $opts['--lines'] } else { '100' }
         if ($lines -notmatch '^[0-9]+$') { Fail 'Invalid --lines' }
-        if ($opts['--docker']) { $a=@('compose','-p',$Profile['PROJECT_NAME'],'logs','--tail',$lines); if ($opts['--follow']) { $a+='--follow' }; Run docker $a }
+        if ($opts['--docker']) { $a=@('compose')+(Compose-Args)+@('logs','--tail',$lines); if ($opts['--follow']) { $a+='--follow' }; Run docker $a }
         else { $path=Join-Path $LogDir 'cli.log'; if (Test-Path $path) { Get-Content $path -Tail ([int]$lines) -Wait:([bool]$opts['--follow']) } }
         exit 0
     }

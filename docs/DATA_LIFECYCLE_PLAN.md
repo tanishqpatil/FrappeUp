@@ -25,3 +25,9 @@
 - Existing running and stopped projects are detected before `new-site` or build. Keep leaves volumes and containers unchanged.
 - Reset cannot proceed without an exported backup and exact typed confirmation.
 - A fresh project still installs Frappe and ERPNext, and the legacy profile still finds its existing site.
+
+## Verified on an isolated project
+
+On 2026-10-22, `frappeup-reset-test` installed Frappe 16.52.0 and ERPNext 16.51.2 on port 8081. A database ToDo and private file were added. Cancelling after backup preserved all volumes. A confirmed reset exported intact database and file archives, removed only that project's volumes, and created a fresh site without either test marker. Restoring the exported backup into that fresh site recovered both markers; Frappe and ERPNext loaded and HTTP returned 200. The pre-existing `frappe1tap-dev` site was checked separately and remained available.
+
+The drill exposed a Frappe backup constraint: a directory inside `sites/<site>/private/backups` causes a later `bench backup` to fail. Reset backups now stage under `sites/.frappeup-backups` before export. This drill does not validate production recovery, encrypted backups, or every Frappe version.
