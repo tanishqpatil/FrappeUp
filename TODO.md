@@ -1,14 +1,16 @@
 # Build checklist
 
-- [x] Replace the script-first design with a self-contained CLI foundation.
-- [x] Add development and production `.env` profiles.
-- [x] Add the official Frappe product-app catalog and dependency planner.
-- [x] Preserve the original implementation as legacy reference.
-- [x] Implement Git commit locking for all official and custom apps.
-- [x] Add per-profile structured operational logs and log following.
-- [x] Add Docker prerequisite diagnostics.
-- [x] Generate isolated commit-locked Docker build workspaces from a lock file.
-- [ ] Generate and run isolated Docker Compose projects from a workspace.
-- [ ] Implement site creation and app installation inside Docker.
-- [ ] Implement status, backup, restore, update, and destroy commands.
-- [x] Add checksum-verified release artifacts for macOS, Linux, and Windows.
+- [x] Script-only CLI and source bootstrap for macOS/Linux.
+- [x] PowerShell CLI and Batch entry points for Windows.
+- [x] Official catalog and custom app definitions.
+- [x] Dependency planning and commit locks.
+- [x] Isolated Docker workspace and site installation.
+- [x] Runtime status and Docker logs.
+- [x] Frappe + ERPNext Docker verification on macOS.
+- [x] Detect existing project volumes and default to preserving the site.
+- [x] Guard interactive reset with exported backup and exact confirmation.
+- [x] Rename CLI and documentation to FrappeUp.
+- [ ] Verify a disposable reset and independent restore end to end.
+- [ ] Add an app install/update migration flow that retains data and verifies health.
+- [ ] Windows end-to-end Docker verification.
+- [ ] Production installation, backup/restore, monitoring, update, and destroy.

@@ -20,6 +20,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+!lib/
+lib/*
+!lib/*.sh
 lib64/
 parts/
 sdist/
@@ -95,6 +98,7 @@ Pipfile.lock
 
 # Docker
 *.env
+!catalog/official-apps.env
 .env
 .dockerignore
 
@@ -112,9 +116,12 @@ Thumbs.db
 sites/
 node_modules/
 
-# Frappe 1-Tap CLI
+# FrappeUp CLI
 dist/
 *.env
+!catalog/official-apps.env
 !profiles/*.env.example
 *.env.lock.json
+*.env.lock.env
+.frappeup/
 .frappe1tap/

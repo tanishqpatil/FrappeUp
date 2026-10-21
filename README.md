@@ -1,61 +1,62 @@
-# Frappe 1-Tap Install
+# FrappeUp
 
-A local, Docker-based CLI for creating reproducible Frappe environments. Users need no server, dashboard, Go, Python, Node, Bench, or Frappe installation before using a released binary.
+**Install Frappe and ERPNext from a terminal. Keep your site data when you return.**
 
-## Current foundation
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Script CLI](https://img.shields.io/badge/host_CLI-shell_%2B_PowerShell-2ea44f)](docs/ARCHITECTURE.md) [![Checks](https://github.com/tanishqpatil/FrappeUp/actions/workflows/check.yml/badge.svg)](https://github.com/tanishqpatil/FrappeUp/actions/workflows/check.yml)
 
-The CLI can create separate development and production profile files, list supported official Frappe product apps, produce a dependency-aware plan, lock every source commit, and materialize a deterministic Docker build workspace. Running Frappe containers and site creation are the next implementation stage.
+FrappeUp is an open-source, script-only CLI for a local Docker-based Frappe development site. The host needs a shell, Git, Docker with Compose and Buildx; it does **not** need Go, Python, Node, or Bench installed. Docker images contain Frappe's runtimes.
 
-After the first release, macOS and Linux users will run the shell launcher:
+| Available now | Planned |
+|---|---|
+| Lock official or user-defined apps to commits | Safely add or upgrade apps on an existing site |
+| Build a Frappe image and create a development site | Production deployment and restore workflows |
+| Show logs, status, and initial credentials | Health checks and low-downtime operations |
+| Detect existing data and default to keeping it | Automated migrations with rollback checks |
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/SwayAlgo/Frappe1TapInstall/main/install.sh | sh
-frappe1tap init --profile development --env-file development.env
-frappe1tap plan --env-file development.env
-```
+## Start with Frappe + ERPNext
 
-The launcher downloads a checksum-verified native binary. Passing command arguments to `install.sh`, `install.ps1`, or `install.bat` installs the binary and then runs that command. A source checkout uses Go to build locally because release artifacts are not stored in Git.
-
-## Profiles and apps
-
-Start from [development.env.example](profiles/development.env.example) or [production.env.example](profiles/production.env.example). Set `INSTALL_APPS` to official catalog IDs. Dependency apps are resolved automatically and appear before apps that require them.
-
-For a third-party app, set `CUSTOM_APPS_FILE` and use [custom-apps.json.example](profiles/custom-apps.json.example). The custom definition supplies its Git URL, tag/branch/commit, Frappe app name, and any known dependencies.
-
-Production plans identify moving refs and will require a commit lock before installation. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## Locked workspace
-
-Create a lock, then materialize it. The workspace contains the locked Frappe Docker runtime context, Frappe and app sources, a generated custom Containerfile, and private generated administrator credentials. It does not start any Docker containers.
+On macOS or Linux, from this checkout:
 
 ```sh
-frappe1tap lock --env-file production.env --force
-frappe1tap workspace --env-file production.env
+./install.sh
+frappeup init --profile development --env-file erpnext.env
+frappeup doctor --env-file erpnext.env
+frappeup plan --env-file erpnext.env
+frappeup lock --env-file erpnext.env
+frappeup workspace --env-file erpnext.env
+frappeup install --env-file erpnext.env
+frappeup status --env-file erpnext.env
 ```
 
-`workspace` refuses a stale lock and refuses to replace an existing workspace unless `--force` is supplied. It uses `FRAPPE_DOCKER_REPOSITORY` and `FRAPPE_DOCKER_REF` from the profile, defaulting to the official `frappe/frappe_docker` repository and `main`.
+Init selects ERPNext. Open **http://localhost:8080**, sign in as **Administrator**, and get the generated initial password with `frappeup credentials --env-file erpnext.env`. Frappe opens its setup wizard after login while setup is incomplete. A password later changed in Frappe is not reflected in the CLI. To run from the checkout without installing a command, use `./frappeup`.
 
-## Logs
+On Windows, run `install.bat` or `install.ps1` from the checkout, then use `frappeup.bat` or `frappeup.ps1` in PowerShell. Docker Desktop and Git are required.
 
-Each profile writes append-only JSON logs to `.frappe1tap/logs/cli.jsonl` beside its `.env` file. Logs record command events and errors without writing profile values; embedded Git URL credentials and common token query parameters are redacted before errors are written.
+## Existing site: keep or reset
+
+A repeat install detects Docker containers **and volumes** for the project before validating a lock or building an image. An interactive terminal offers **Keep** (default) or **Reset**. Keep exits without changing the deployment or database. In scripts, `--existing keep` is explicit; without a terminal, keep is the default.
+
+Reset requires a running site, exports database, public/private files, and site configuration outside Docker, checks the files, and then requires `RESET <project-name>` before removing that project's Compose volumes. Verify a backup by restoring it independently before relying on it. Do not use reset to update apps.
+
+Changing `INSTALL_APPS` or a ref does **not yet** migrate an existing site. FrappeUp keeps it unchanged; migration is a separate future command. This development setup does not promise zero downtime.
 
 ```sh
-frappe1tap logs --env-file production.env
-frappe1tap logs --env-file production.env --follow
+frappeup install --env-file erpnext.env --existing keep
+frappeup logs --env-file erpnext.env --docker --lines 100
 ```
 
-## Docker readiness
+Existing `frappe1tap-dev` profiles and `.frappe1tap` workspaces remain discoverable. Run `./install.sh` from this checkout to put the new command in your existing CLI directory, then use the same profile and project name. Do not rename `PROJECT_NAME` to access an existing site.
 
-Run this before creating an environment. It checks the Docker CLI, Docker Compose, Buildx, and Docker daemon, then explains how to fix any failed prerequisite.
+## Apps and versions
 
-```sh
-frappe1tap doctor --env-file production.env
-```
+The [official app catalog](catalog/official-apps.env) supplies repositories, default refs, declared Frappe majors, and dependencies. `INSTALL_APPS=erpnext,hrms` selects apps; `APP_ERPNEXT_REF=version-16` overrides a ref. Use `*_REF_KIND=branch`, `tag`, or `commit`. A lock records resolved commits; a workspace snapshots sources before build.
 
-## Legacy files
+For apps outside the catalog, use [custom app definitions](profiles/custom-apps.env.example) through `CUSTOM_APPS_FILE`. Treat profile and custom app files as trusted local scripts. The catalog is a starting point, not a compatibility guarantee for every version combination.
 
-The original DIY Docker scripts are preserved in [legacy](legacy/README.md). They are no longer part of the active implementation.
+The only implemented install profile is **development**. Production may be planned and locked but cannot yet be installed. See the [architecture](docs/ARCHITECTURE.md), [data lifecycle](docs/DATA_LIFECYCLE_PLAN.md), [roadmap](TODO.md), and [contributing guide](CONTRIBUTING.md).
 
-## License
+## Releases
 
-Apache License 2.0. See [LICENSE](LICENSE).
+After a tagged release is published, `install.sh` and `install.ps1` can download checksum-verified script bundles. This source checkout works immediately without a release. Releases and source: [github.com/tanishqpatil/FrappeUp](https://github.com/tanishqpatil/FrappeUp).
+
+Licensed under [Apache-2.0](LICENSE).

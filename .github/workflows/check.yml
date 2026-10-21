@@ -1,0 +1,24 @@
+name: Check script CLI
+on: [push, pull_request]
+jobs:
+  unix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh -n frappeup install.sh lib/common.sh
+      - run: ./tests/smoke.sh
+      - run: |
+          ./frappeup init --profile development --env-file test.env
+          ./frappeup plan --env-file test.env
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          $tokens=$null; $errors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./frappeup.ps1),[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count) { throw ($errors | Out-String) }
+          ./frappeup.ps1 version
+          ./frappeup.ps1 catalog list
+          ./tests/powershell-smoke.ps1

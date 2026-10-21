@@ -1,0 +1,475 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$SCRIPT_DIR/lib/common.sh" ]; then
+  ROOT_DIR=$SCRIPT_DIR
+else
+  ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+fi
+# shellcheck source=lib/common.sh
+. "$ROOT_DIR/lib/common.sh"
+CATALOG_FILE="$ROOT_DIR/catalog/official-apps.env"
+[ -r "$CATALOG_FILE" ] || fail "official app catalog is missing: $CATALOG_FILE"
+# shellcheck source=catalog/official-apps.env
+. "$CATALOG_FILE"
+
+VERSION='0.3.0'
+ENV_FILE=''
+LOCK_FILE=''
+FORCE=false
+LINES=100
+FOLLOW=false
+DOCKER_LOGS=false
+PLAN_APPS=''
+EXISTING_ACTION='ask'
+
+usage() {
+  cat <<'TEXT'
+FrappeUp CLI
+
+Usage:
+  frappeup init --profile development|production [--env-file PATH] [--force]
+  frappeup catalog list
+  frappeup plan --env-file PATH
+  frappeup lock --env-file PATH [--output PATH] [--force]
+  frappeup workspace --env-file PATH [--lock-file PATH] [--force]
+  frappeup install --env-file PATH [--existing keep]
+  frappeup credentials --env-file PATH
+  frappeup status --env-file PATH
+  frappeup logs --env-file PATH [--docker] [--lines N] [--follow]
+  frappeup doctor [--env-file PATH]
+  frappeup version
+TEXT
+}
+
+parse_common() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --env-file) [ "$#" -gt 1 ] || fail '--env-file needs a path'; ENV_FILE=$2; shift 2 ;;
+      --lock-file) [ "$#" -gt 1 ] || fail '--lock-file needs a path'; LOCK_FILE=$2; shift 2 ;;
+      --output) [ "$#" -gt 1 ] || fail '--output needs a path'; LOCK_FILE=$2; shift 2 ;;
+      --force) FORCE=true; shift ;;
+      --lines) [ "$#" -gt 1 ] || fail '--lines needs a number'; LINES=$2; shift 2 ;;
+      --follow) FOLLOW=true; shift ;;
+      --docker) DOCKER_LOGS=true; shift ;;
+      --existing) [ "$#" -gt 1 ] || fail '--existing needs keep'; [ "$2" = keep ] || fail '--existing supports keep only'; EXISTING_ACTION=keep; shift 2 ;;
+      *) fail "unknown option: $1" ;;
+    esac
+  done
+}
+
+load_profile() {
+  [ -n "$ENV_FILE" ] || fail '--env-file is required'
+  [ -r "$ENV_FILE" ] || fail "cannot read profile: $ENV_FILE"
+  ENV_FILE=$(CDPATH= cd -- "$(dirname -- "$ENV_FILE")" && pwd)/$(basename -- "$ENV_FILE")
+  ENV_DIR=$(dirname -- "$ENV_FILE")
+  # Profile files are shell-compatible KEY=VALUE files owned by the local user.
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  PROFILE=${PROFILE:-development}
+  PROJECT_NAME=${PROJECT_NAME:-frappeup}
+  SITE_NAME=${SITE_NAME:-site.localhost}
+  FRAPPE_REPOSITORY=${FRAPPE_REPOSITORY:-https://github.com/frappe/frappe}
+  FRAPPE_REF=${FRAPPE_REF:-version-16}
+  FRAPPE_REF_KIND=${FRAPPE_REF_KIND:-branch}
+  FRAPPE_DOCKER_REPOSITORY=${FRAPPE_DOCKER_REPOSITORY:-https://github.com/frappe/frappe_docker}
+  FRAPPE_DOCKER_REF=${FRAPPE_DOCKER_REF:-main}
+  FRAPPE_DOCKER_REF_KIND=${FRAPPE_DOCKER_REF_KIND:-branch}
+  FRAPPE_MAJOR=${FRAPPE_MAJOR:-16}
+  INSTALL_APPS=${INSTALL_APPS:-}
+  if [ -n "${WORKSPACE_DIR:-}" ]; then
+    case "$WORKSPACE_DIR" in /*) :;; *) WORKSPACE_DIR="$ENV_DIR/$WORKSPACE_DIR";; esac
+  elif [ -e "$ENV_DIR/.frappe1tap/workspaces/$PROJECT_NAME" ]; then
+    WORKSPACE_DIR="$ENV_DIR/.frappe1tap/workspaces/$PROJECT_NAME"
+  else
+    WORKSPACE_DIR="$ENV_DIR/.frappeup/workspaces/$PROJECT_NAME"
+  fi
+  case "$WORKSPACE_DIR" in */.frappe1tap/workspaces/*) LOG_DIR="$ENV_DIR/.frappe1tap/logs";; *) LOG_DIR="$ENV_DIR/.frappeup/logs";; esac
+  case "$PROFILE" in development|production) :;; *) fail 'PROFILE must be development or production';; esac
+  valid_identifier "$PROJECT_NAME" || fail 'PROJECT_NAME may contain only letters, numbers, _ and -'
+  valid_site "$SITE_NAME" || fail 'SITE_NAME may contain only letters, numbers, dots, and -'
+  case "$FRAPPE_MAJOR" in *[!0-9]*|'') fail 'FRAPPE_MAJOR must be a positive integer';; esac
+  [ "$FRAPPE_MAJOR" -gt 0 ] || fail 'FRAPPE_MAJOR must be a positive integer'
+  if [ -n "${CUSTOM_APPS_FILE:-}" ]; then
+    case "$CUSTOM_APPS_FILE" in /*) :;; *) CUSTOM_APPS_FILE="$ENV_DIR/$CUSTOM_APPS_FILE";; esac
+    [ -r "$CUSTOM_APPS_FILE" ] || fail "cannot read CUSTOM_APPS_FILE: $CUSTOM_APPS_FILE"
+    # shellcheck disable=SC1090
+    . "$CUSTOM_APPS_FILE"
+    APP_IDS="$APP_IDS ${CUSTOM_APP_IDS:-}"
+  fi
+}
+
+app_field() {
+  valid_app_id "$1" || fail "invalid app id: $1"
+  case "$2" in DISPLAY_NAME|REPOSITORY|REF|REF_KIND|APP_NAME|REQUIRES|MAJORS) :;; *) fail 'invalid catalog field';; esac
+  eval "printf '%s' \"\${APP_$1_$2-}\""
+}
+
+effective_ref() {
+  id=$1
+  key=$(upper "$id")
+  eval "override=\${APP_${key}_REF-}"
+  if [ -n "${override:-}" ]; then printf '%s' "$override"; else app_field "$id" REF; fi
+}
+
+effective_ref_kind() {
+  id=$1
+  key=$(upper "$id")
+  eval "override=\${APP_${key}_REF_KIND-}"
+  if [ -n "${override:-}" ]; then printf '%s' "$override"; else app_field "$id" REF_KIND; fi
+}
+
+is_supported() { case " $(app_field "$1" MAJORS) " in *" $FRAPPE_MAJOR "*) return 0;; *) return 1;; esac; }
+contains_word() { case " $1 " in *" $2 "*) return 0;; *) return 1;; esac; }
+resolve_app() {
+  valid_app_id "$1" || fail "invalid app id: $1"
+  [ -n "$(app_field "$1" REPOSITORY)" ] || fail "unknown app: $1; add it to CUSTOM_APPS_FILE"
+  is_supported "$1" || fail "$1 does not declare support for Frappe $FRAPPE_MAJOR"
+  eval "state=\${RESOLVE_$1-}"
+  case "${state:-}" in done) return;; visiting) fail "cyclic dependency at app $1";; esac
+  eval "RESOLVE_$1=visiting"
+  for dependency in $(app_field "$1" REQUIRES); do resolve_app "$dependency"; done
+  PLAN_APPS="$PLAN_APPS $1"
+  eval "RESOLVE_$1=done"
+}
+
+build_plan() {
+  PLAN_APPS=''
+  for id in $(printf '%s' "$INSTALL_APPS" | tr ',' ' '); do [ -z "$id" ] || resolve_app "$id"; done
+  PLAN_APPS=$(printf '%s\n' "$PLAN_APPS" | awk '{$1=$1; print}')
+}
+
+plan_checksum() {
+  {
+    printf 'project=%s\nsite=%s\nfrappe=%s@%s|%s\nfrappe_docker=%s@%s|%s\nmajor=%s\n' "$PROJECT_NAME" "$SITE_NAME" "$FRAPPE_REPOSITORY" "$FRAPPE_REF" "$FRAPPE_REF_KIND" "$FRAPPE_DOCKER_REPOSITORY" "$FRAPPE_DOCKER_REF" "$FRAPPE_DOCKER_REF_KIND" "$FRAPPE_MAJOR"
+    for id in $PLAN_APPS; do printf 'app=%s|%s|%s|%s|%s\n' "$id" "$(app_field "$id" REPOSITORY)" "$(effective_ref "$id")" "$(effective_ref_kind "$id")" "$(app_field "$id" APP_NAME)"; done
+  } | sha256
+}
+
+legacy_plan_checksum() {
+  {
+    printf 'project=%s\nsite=%s\nfrappe=%s@%s\nfrappe_docker=%s@%s\nmajor=%s\n' "$PROJECT_NAME" "$SITE_NAME" "$FRAPPE_REPOSITORY" "$FRAPPE_REF" "$FRAPPE_DOCKER_REPOSITORY" "$FRAPPE_DOCKER_REF" "$FRAPPE_MAJOR"
+    for id in $PLAN_APPS; do printf 'app=%s|%s|%s|%s\n' "$id" "$(app_field "$id" REPOSITORY)" "$(effective_ref "$id")" "$(app_field "$id" APP_NAME)"; done
+  } | sha256
+}
+
+write_env_var() { printf "%s='%s'\n" "$1" "$(quote_env "$2")"; }
+resolve_commit() {
+  repository=$1 ref=$2 kind=$3
+  require_command git
+  case "$kind" in commit) case "$ref" in *[!0-9a-fA-F]*|'') fail 'commit ref must be a hexadecimal hash';; esac; [ "${#ref}" -eq 40 ] || fail 'commit ref must be a 40-character hash'; printf '%s' "$ref"; return;; branch) refs="$ref refs/heads/$ref";; tag) refs="$ref refs/tags/$ref refs/tags/$ref^{}";; *) fail "invalid ref kind $kind for $repository";; esac
+  output=$(GIT_TERMINAL_PROMPT=0 git ls-remote "$repository" $refs 2>&1) || fail "resolve $repository @ $ref: $output"
+  if [ "$kind" = tag ]; then commit=$(printf '%s\n' "$output" | awk -v r="refs/tags/$ref^{}" '$2==r {print $1; exit}'); else commit=''; fi
+  [ -n "$commit" ] || commit=$(printf '%s\n' "$output" | awk -v r="$ref" -v h="refs/heads/$ref" -v t="refs/tags/$ref" '$2==r || $2==h || $2==t {print $1; exit}')
+  [ -n "$commit" ] || fail "ref $ref was not found in $repository"
+  printf '%s' "$commit"
+}
+
+load_lock() {
+  [ -n "$LOCK_FILE" ] || LOCK_FILE="$ENV_FILE.lock.env"
+  [ -r "$LOCK_FILE" ] || fail "cannot read lock file: $LOCK_FILE"
+  # shellcheck disable=SC1090
+  . "$LOCK_FILE"
+  case "${LOCK_SCHEMA:-}" in
+    1)
+      [ "$LOCK_PLAN_SHA256" = "$(legacy_plan_checksum)" ] || fail 'lock file does not match profile; run lock and workspace again'
+      [ "$FRAPPE_REF_KIND" = branch ] && [ "$FRAPPE_DOCKER_REF_KIND" = branch ] && [ -z "${CUSTOM_APPS_FILE:-}" ] || fail 'legacy lock cannot verify ref kinds; run lock and workspace again'
+      for id in $PLAN_APPS; do [ "$(effective_ref_kind "$id")" = "$(app_field "$id" REF_KIND)" ] || fail 'legacy lock cannot verify app ref kind; run lock and workspace again'; done
+      ;;
+    2)
+      [ "$LOCK_PLAN_SHA256" = "$(plan_checksum)" ] || fail 'lock file does not match profile; run lock and workspace again'
+      [ "$LOCK_FRAPPE_REF_KIND" = "$FRAPPE_REF_KIND" ] && [ "$LOCK_FRAPPE_DOCKER_REF_KIND" = "$FRAPPE_DOCKER_REF_KIND" ] || fail 'lock ref kind does not match profile'
+      for id in $PLAN_APPS; do eval "locked_kind=\${LOCK_APP_${id}_REF_KIND-}"; [ "$locked_kind" = "$(effective_ref_kind "$id")" ] || fail "lock ref kind does not match app $id"; done
+      ;;
+    *) fail 'unsupported lock file; run lock again' ;;
+  esac
+}
+
+snapshot() {
+  repository=$1 commit=$2 destination=$3
+  GIT_TERMINAL_PROMPT=0 git clone --no-checkout --filter=blob:none "$repository" "$destination" || fail "clone failed: $repository"
+  GIT_TERMINAL_PROMPT=0 git -C "$destination" fetch --filter=blob:none origin "$commit" || fail "fetch failed: $repository@$commit"
+  git -C "$destination" checkout --detach "$commit" || fail "checkout failed: $repository@$commit"
+  git -C "$destination" branch -f frappeup-lock "$commit" >/dev/null
+}
+
+workspace_command() {
+  load_profile; build_plan; load_lock
+  if [ "$FORCE" = true ] && [ -e "$WORKSPACE_DIR" ]; then
+    if command -v docker >/dev/null 2>&1 && { [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME" 2>/dev/null)" ] || [ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT_NAME" 2>/dev/null)" ]; }; then
+      fail "project $PROJECT_NAME has Docker resources; refusing to replace its workspace"
+    fi
+    rm -rf "$WORKSPACE_DIR"
+  fi
+  [ ! -e "$WORKSPACE_DIR" ] || fail "workspace exists: $WORKSPACE_DIR; use --force to replace it"
+  temp="$WORKSPACE_DIR.tmp.$$"
+  trap 'rm -rf "$temp"' EXIT HUP INT TERM
+  mkdir -p "$temp"
+  snapshot "$LOCK_FRAPPE_DOCKER_REPOSITORY" "$LOCK_FRAPPE_DOCKER_COMMIT" "$temp/runtime"
+  mkdir -p "$temp/runtime/sources/apps"
+  snapshot "$LOCK_FRAPPE_REPOSITORY" "$LOCK_FRAPPE_COMMIT" "$temp/runtime/sources/frappe"
+  for id in $PLAN_APPS; do
+    eval "repo=\${LOCK_APP_${id}_REPOSITORY-}"; eval "commit=\${LOCK_APP_${id}_COMMIT-}"
+    [ -n "${repo:-}" ] && [ -n "${commit:-}" ] || fail "lock file lacks app $id"
+    snapshot "$repo" "$commit" "$temp/runtime/sources/apps/$id"
+  done
+  containerfile="$temp/runtime/images/custom/Containerfile"
+  [ "$(grep -c '^ARG FRAPPE_BRANCH=' "$containerfile")" -eq 1 ] || fail 'unsupported Frappe Docker Containerfile: FRAPPE_BRANCH is not unique'
+  [ "$(grep -c '^ARG FRAPPE_PATH=' "$containerfile")" -eq 1 ] || fail 'unsupported Frappe Docker Containerfile: FRAPPE_PATH is not unique'
+  awk 'BEGIN {added=0} $0=="USER frappe" && !added {print; print ""; print "# Commit-locked sources generated by FrappeUp."; print "COPY --chown=frappe:0 sources /opt/frappe/sources"; added=1; next} {print}' "$containerfile" | sed 's|^ARG FRAPPE_BRANCH=.*|ARG FRAPPE_BRANCH=frappeup-lock|; s|^ARG FRAPPE_PATH=.*|ARG FRAPPE_PATH=file:///opt/frappe/sources/frappe|' > "$containerfile.tmp"
+  mv "$containerfile.tmp" "$containerfile"
+  {
+    printf '[\n'; first=true
+    for id in $PLAN_APPS; do
+      if [ "$first" = true ]; then first=false; else printf ',\n'; fi
+      printf '  {"url":"file:///opt/frappe/sources/apps/%s","branch":"frappeup-lock"}' "$id"
+    done
+    printf '\n]\n'
+  } > "$temp/runtime/apps.json"
+  umask 077
+  { printf '# generated private runtime secrets\n'; printf 'ADMIN_PASSWORD='; dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n'; printf '\nDB_PASSWORD='; dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n'; printf '\n'; } > "$temp/credentials.env"
+  write_env_var WORKSPACE_PLAN_SHA256 "$LOCK_PLAN_SHA256" > "$temp/workspace.env"
+  write_env_var IMAGE "frappeup/$PROJECT_NAME" >> "$temp/workspace.env"
+  write_env_var TAG "$(printf '%s' "$LOCK_PLAN_SHA256" | cut -c1-12)" >> "$temp/workspace.env"
+  mv "$temp" "$WORKSPACE_DIR"; trap - EXIT HUP INT TERM
+  log_event 'workspace.completed'
+  printf 'Created workspace %s\n' "$WORKSPACE_DIR"
+}
+
+compose_runtime() {
+  if [ -r "$runtime/.frappeup.env" ]; then runtime_env="$runtime/.frappeup.env"; else runtime_env="$runtime/.frappe1tap.env"; fi
+  if [ -r "$runtime/frappeup.create-site.yaml" ]; then site_compose="$runtime/frappeup.create-site.yaml"; else site_compose="$runtime/frappe1tap.create-site.yaml"; fi
+  docker compose --env-file "$runtime_env" --env-file "$WORKSPACE_DIR/credentials.env" -p "$PROJECT_NAME" -f "$runtime/compose.yaml" -f "$runtime/overrides/compose.mariadb.yaml" -f "$runtime/overrides/compose.redis.yaml" -f "$runtime/overrides/compose.noproxy.yaml" -f "$site_compose" "$@"
+}
+
+project_resources() {
+  container_ids=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME") || fail 'cannot inspect Docker containers'
+  volume_names=$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT_NAME") || fail 'cannot inspect Docker volumes'
+  [ -n "$container_ids" ] || [ -n "$volume_names" ]
+}
+
+show_project_resources() {
+  printf 'Existing Docker project: %s\n' "$PROJECT_NAME"
+  if [ -n "$container_ids" ]; then docker ps -a --filter "label=com.docker.compose.project=$PROJECT_NAME" --format '  container: {{.Names}} ({{.Status}})'; fi
+  if [ -n "$volume_names" ]; then docker volume ls --filter "label=com.docker.compose.project=$PROJECT_NAME" --format '  volume: {{.Name}}'; fi
+}
+
+choose_existing_action() {
+  [ "$EXISTING_ACTION" = keep ] && { printf 'Keeping existing data and deployment; no changes made.\n'; return 1; }
+  if [ ! -t 0 ]; then printf 'Keeping existing data in non-interactive mode; no changes made.\n'; return 1; fi
+  printf 'Choose [K]eep data or [R]eset after a verified backup (default K): ' >&2
+  IFS= read -r answer || answer=''
+  case "$answer" in r|R|reset|RESET) return 0;; ''|k|K|keep|KEEP) printf 'Keeping existing data and deployment; no changes made.\n'; return 1;; *) fail 'invalid choice; no changes made';; esac
+}
+
+backup_before_reset() {
+  backend_id=$(docker compose -p "$PROJECT_NAME" ps -q backend 2>/dev/null) || backend_id=''
+  [ -n "$backend_id" ] || fail 'reset requires a running backend to create a verified backup; no data was changed'
+  docker compose -p "$PROJECT_NAME" exec -T backend bench --site "$SITE_NAME" list-apps >/dev/null || fail "site $SITE_NAME is not available for backup; no data was changed"
+  stamp=$(date -u '+%Y%m%d_%H%M%S')
+  backup_dir="$ENV_DIR/.frappeup/backups/$PROJECT_NAME/$stamp-$$"
+  container_backup="/home/frappe/frappe-bench/sites/$SITE_NAME/private/backups/frappeup-reset-$stamp-$$"
+  umask 077
+  mkdir -p "$backup_dir"
+  docker compose -p "$PROJECT_NAME" exec -T backend bench --site "$SITE_NAME" backup --with-files --compress --backup-path "$container_backup" || fail "backup failed; no data was changed (partial files: $backup_dir)"
+  docker cp "$backend_id:$container_backup/." "$backup_dir" || fail "backup export failed; no data was changed (partial files: $backup_dir)"
+  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-database*.sql.gz' -size +0c -print -quit)" ] || fail 'database backup is missing; no data was changed'
+  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-files.tgz' ! -name '*-private-files.tgz' -size +0c -print -quit)" ] || fail 'public files backup is missing; no data was changed'
+  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-private-files.tgz' -size +0c -print -quit)" ] || fail 'private files backup is missing; no data was changed'
+  [ -n "$(find "$backup_dir" -maxdepth 1 -type f -name '*-site_config_backup.json' -size +0c -print -quit)" ] || fail 'site configuration backup is missing; no data was changed'
+  printf 'Verified backup: %s\n' "$backup_dir"
+}
+
+reset_project() {
+  backup_before_reset
+  printf 'Type RESET %s to remove its Docker volumes: ' "$PROJECT_NAME" >&2
+  IFS= read -r confirmation || confirmation=''
+  [ "$confirmation" = "RESET $PROJECT_NAME" ] || { printf 'Reset cancelled; existing data is unchanged.\n'; return 1; }
+  compose_runtime down --volumes --remove-orphans
+  log_event 'reset.completed'
+  printf 'Reset project %s; backup remains at %s\n' "$PROJECT_NAME" "$backup_dir"
+}
+
+site_exists() {
+  backend_id=$(docker compose -p "$PROJECT_NAME" ps -q backend 2>/dev/null) || return 1
+  [ -n "$backend_id" ] || return 1
+  expected_image="frappeup/$PROJECT_NAME:$(printf '%s' "$LOCK_PLAN_SHA256" | cut -c1-12)"
+  actual_image=$(docker inspect --format '{{.Config.Image}}' "$backend_id" 2>/dev/null) || return 1
+  [ "$actual_image" = "$expected_image" ] || fail "project $PROJECT_NAME runs a different locked image; use a new PROJECT_NAME"
+  installed=$(docker compose -p "$PROJECT_NAME" exec -T backend bench --site "$SITE_NAME" list-apps 2>/dev/null) || return 1
+  for id in $PLAN_APPS; do app=$(app_field "$id" APP_NAME); printf '%s\n' "$installed" | awk '{print $1}' | grep -Fx "$app" >/dev/null || fail "site $SITE_NAME already exists without required app $app; refusing to replace it"; done
+  return 0
+}
+
+validate_install_workspace() {
+  build_plan; load_lock
+  runtime="$WORKSPACE_DIR/runtime"
+  [ -r "$runtime/images/custom/Containerfile" ] && [ -r "$runtime/apps.json" ] && [ -r "$WORKSPACE_DIR/credentials.env" ] || fail 'workspace is incomplete; run workspace first'
+  [ -r "$WORKSPACE_DIR/workspace.env" ] || fail 'workspace metadata is missing; run workspace first'
+  . "$WORKSPACE_DIR/workspace.env"
+  [ "$WORKSPACE_PLAN_SHA256" = "$LOCK_PLAN_SHA256" ] || fail 'workspace does not match lock; run workspace again'
+}
+
+build_runtime_image() {
+  image="frappeup/$PROJECT_NAME" tag=$(printf '%s' "$LOCK_PLAN_SHA256" | cut -c1-12)
+  docker buildx build --platform linux/amd64 --load --tag "$image:$tag" --file "$runtime/images/custom/Containerfile" --secret "id=apps_json,src=$runtime/apps.json" "$runtime"
+  { printf 'CUSTOM_IMAGE=%s\nCUSTOM_TAG=%s\nPULL_POLICY=never\nFRAPPE_SITE_NAME_HEADER=%s\n' "$image" "$tag" "$SITE_NAME"; } > "$runtime/.frappeup.env"
+  script="set -e; wait-for-it db:3306 -t 120; bench new-site --mariadb-user-host-login-scope=% --admin-password=\$\$ADMIN_PASSWORD --db-root-username=root --db-root-password=\$\$DB_PASSWORD --set-default $SITE_NAME;"
+  for id in $PLAN_APPS; do app=$(app_field "$id" APP_NAME); valid_identifier "$app" || fail "invalid app name: $app"; script="$script bench --site $SITE_NAME install-app $app;"; done
+  cat > "$runtime/frappeup.create-site.yaml" <<EOF2
+services:
+  create-site:
+    image: \${CUSTOM_IMAGE}:\${CUSTOM_TAG}
+    platform: linux/amd64
+    pull_policy: never
+    restart: "no"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    environment:
+      ADMIN_PASSWORD: \${ADMIN_PASSWORD}
+      DB_PASSWORD: \${DB_PASSWORD}
+    entrypoint: ["bash", "-c"]
+    command: ["$script"]
+EOF2
+  compose_runtime config -q
+}
+
+install_command() {
+  load_profile
+  [ "$PROFILE" = development ] || fail 'production installation is not implemented yet'
+  doctor_check
+  existing=false
+  if project_resources; then
+    existing=true
+    show_project_resources
+    if ! choose_existing_action; then return 0; fi
+  fi
+  validate_install_workspace
+  build_runtime_image
+  if [ "$existing" = true ]; then
+    if ! reset_project; then return 0; fi
+  fi
+  compose_runtime up -d
+  compose_runtime wait create-site || fail "site creation failed; run: frappeup logs --env-file $ENV_FILE --docker"
+  site_exists || fail 'site task exited successfully but site is not available'
+  log_event 'install.completed'
+  printf 'Installed %s\n' "$SITE_NAME"
+  printf 'Sign in as Administrator. Get the initial password with: frappeup credentials --env-file %s\n' "$ENV_FILE"
+}
+
+doctor_check() {
+  require_command docker
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || fail 'Docker daemon is not ready'
+  docker compose version >/dev/null 2>&1 || fail 'Docker Compose is required'
+  docker buildx version >/dev/null 2>&1 || fail 'Docker Buildx is required'
+}
+
+doctor_command() { [ -n "$ENV_FILE" ] && load_profile || LOG_DIR="$(pwd)/.frappeup/logs"; doctor_check; printf 'PASS Docker CLI, Docker Compose, Buildx, and daemon\n'; log_event 'doctor.completed'; }
+
+credentials_command() {
+  load_profile
+  credentials="$WORKSPACE_DIR/credentials.env"
+  [ -r "$credentials" ] || fail "initial credentials are missing: $credentials"
+  [ "$(grep -c '^ADMIN_PASSWORD=' "$credentials")" -eq 1 ] || fail 'initial Administrator password is missing or ambiguous'
+  password=$(sed -n 's/^ADMIN_PASSWORD=//p' "$credentials")
+  [ -n "$password" ] || fail 'initial Administrator password is empty'
+  printf 'Login: Administrator\nInitial password: %s\n' "$password"
+}
+
+init_command() {
+  profile=development
+  while [ "$#" -gt 0 ]; do case "$1" in --profile) [ "$#" -gt 1 ] || fail '--profile needs a value'; profile=$2; shift 2;; --env-file) [ "$#" -gt 1 ] || fail '--env-file needs a path'; ENV_FILE=$2; shift 2;; --force) FORCE=true; shift;; *) fail "unknown option: $1";; esac; done
+  case "$profile" in development|production) :;; *) fail '--profile must be development or production';; esac
+  [ -n "$ENV_FILE" ] || ENV_FILE="frappeup.$profile.env"
+  [ ! -e "$ENV_FILE" ] || [ "$FORCE" = true ] || fail "$ENV_FILE already exists; use --force"
+  case "$profile" in development) project=frappeup-dev; site=site.localhost;; production) project=frappeup-prod; site=site.example.com;; esac
+  cat > "$ENV_FILE" <<EOF2
+PROFILE=$profile
+PROJECT_NAME=$project
+SITE_NAME=$site
+FRAPPE_REPOSITORY=https://github.com/frappe/frappe
+FRAPPE_REF=version-16
+FRAPPE_REF_KIND=branch
+FRAPPE_DOCKER_REPOSITORY=https://github.com/frappe/frappe_docker
+FRAPPE_DOCKER_REF=main
+FRAPPE_DOCKER_REF_KIND=branch
+FRAPPE_MAJOR=16
+INSTALL_APPS=erpnext
+# Override an official app version: APP_ERPNEXT_REF=version-16
+# Add third-party app definitions: CUSTOM_APPS_FILE=custom-apps.env
+EOF2
+  chmod 600 "$ENV_FILE"; printf 'Created %s\n' "$ENV_FILE"
+}
+
+plan_command() { load_profile; build_plan; printf 'Profile: %s\nProject: %s\nSite: %s\nFrappe: %s @ %s\nFrappe Docker: %s @ %s\nApps (install order):\n' "$PROFILE" "$PROJECT_NAME" "$SITE_NAME" "$FRAPPE_REPOSITORY" "$FRAPPE_REF" "$FRAPPE_DOCKER_REPOSITORY" "$FRAPPE_DOCKER_REF"; for id in $PLAN_APPS; do printf '  - %s [%s] @ %s\n' "$id" "$(effective_ref_kind "$id")" "$(effective_ref "$id")"; done; }
+
+lock_command() {
+  load_profile; build_plan
+  [ -n "$LOCK_FILE" ] || LOCK_FILE="$ENV_FILE.lock.env"
+  [ ! -e "$LOCK_FILE" ] || [ "$FORCE" = true ] || fail "$LOCK_FILE already exists; use --force"
+  mkdir -p "$(dirname -- "$LOCK_FILE")"; umask 077
+  temp_lock="$LOCK_FILE.tmp.$$"
+  trap 'rm -f "$temp_lock"' EXIT HUP INT TERM
+  frappe_commit=$(resolve_commit "$FRAPPE_REPOSITORY" "$FRAPPE_REF" "$FRAPPE_REF_KIND")
+  docker_commit=$(resolve_commit "$FRAPPE_DOCKER_REPOSITORY" "$FRAPPE_DOCKER_REF" "$FRAPPE_DOCKER_REF_KIND")
+  {
+    write_env_var LOCK_SCHEMA 2
+    write_env_var LOCK_PLAN_SHA256 "$(plan_checksum)"
+    write_env_var LOCK_PROJECT_NAME "$PROJECT_NAME"
+    write_env_var LOCK_SITE_NAME "$SITE_NAME"
+    write_env_var LOCK_FRAPPE_REPOSITORY "$FRAPPE_REPOSITORY"; write_env_var LOCK_FRAPPE_REF "$FRAPPE_REF"; write_env_var LOCK_FRAPPE_REF_KIND "$FRAPPE_REF_KIND"; write_env_var LOCK_FRAPPE_COMMIT "$frappe_commit"
+    write_env_var LOCK_FRAPPE_DOCKER_REPOSITORY "$FRAPPE_DOCKER_REPOSITORY"; write_env_var LOCK_FRAPPE_DOCKER_REF "$FRAPPE_DOCKER_REF"; write_env_var LOCK_FRAPPE_DOCKER_REF_KIND "$FRAPPE_DOCKER_REF_KIND"; write_env_var LOCK_FRAPPE_DOCKER_COMMIT "$docker_commit"
+    write_env_var LOCK_APP_IDS "$PLAN_APPS"
+    for id in $PLAN_APPS; do
+      app_commit=$(resolve_commit "$(app_field "$id" REPOSITORY)" "$(effective_ref "$id")" "$(effective_ref_kind "$id")")
+      write_env_var "LOCK_APP_${id}_REPOSITORY" "$(app_field "$id" REPOSITORY)"
+      write_env_var "LOCK_APP_${id}_REF" "$(effective_ref "$id")"
+      write_env_var "LOCK_APP_${id}_REF_KIND" "$(effective_ref_kind "$id")"
+      write_env_var "LOCK_APP_${id}_APP_NAME" "$(app_field "$id" APP_NAME)"
+      write_env_var "LOCK_APP_${id}_COMMIT" "$app_commit"
+    done
+  } > "$temp_lock"
+  chmod 600 "$temp_lock"; mv "$temp_lock" "$LOCK_FILE"; trap - EXIT HUP INT TERM
+  log_event 'lock.completed'; printf 'Created %s\n' "$LOCK_FILE"
+}
+
+status_command() { load_profile; docker compose -p "$PROJECT_NAME" ps; }
+logs_command() {
+  load_profile
+  if [ "$DOCKER_LOGS" = true ]; then
+    if [ "$FOLLOW" = true ]; then docker compose -p "$PROJECT_NAME" logs --tail "$LINES" --follow
+    else docker compose -p "$PROJECT_NAME" logs --tail "$LINES"; fi
+  else
+    logfile="$LOG_DIR/cli.log"
+    [ -r "$logfile" ] || return 0
+    if [ "$FOLLOW" = true ]; then tail -n "$LINES" -f "$logfile"
+    else tail -n "$LINES" "$logfile"; fi
+  fi
+}
+catalog_command() { [ "${1:-}" = list ] && [ "$#" -eq 1 ] || fail 'usage: frappeup catalog list'; for id in $APP_IDS; do printf '%-24s %-28s %s @ %s\n' "$id" "$(app_field "$id" DISPLAY_NAME)" "$(app_field "$id" REF_KIND)" "$(app_field "$id" REF)"; done; }
+
+[ "$#" -gt 0 ] || { usage; exit 0; }
+command=$1; shift
+case "$command" in
+  help|--help|-h) usage ;;
+  version|--version) printf '%s\n' "$VERSION" ;;
+  init) init_command "$@" ;;
+  catalog) catalog_command "$@" ;;
+  plan) parse_common "$@"; plan_command ;;
+  lock) parse_common "$@"; lock_command ;;
+  workspace) parse_common "$@"; workspace_command ;;
+  install) parse_common "$@"; install_command ;;
+  credentials) parse_common "$@"; credentials_command ;;
+  status) parse_common "$@"; status_command ;;
+  logs) parse_common "$@"; logs_command ;;
+  doctor) parse_common "$@"; doctor_command ;;
+  *) fail "unknown command $command; run frappeup help" ;;
+esac

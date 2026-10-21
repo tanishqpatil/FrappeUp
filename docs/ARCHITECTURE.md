@@ -1,39 +1,21 @@
 # Architecture
 
-Frappe 1-Tap is a local CLI. It does not require a service or dashboard.
+FrappeUp has no compiled host component. `frappeup` is POSIX shell; `frappeup.ps1` is PowerShell; `frappeup.bat` is a Windows launcher. Docker runs Frappe, MariaDB, Redis, and apps. Git resolves and snapshots sources. No host Go, Python, Node, or Bench is required.
 
-The project is licensed under Apache-2.0. This license applies to Frappe 1-Tap itself; each app selected by a user retains its own license.
+```text
+trusted profile + catalog → dependency plan → commit lock → immutable workspace
+                                                        ↓
+                                     build image → Compose project → Frappe site
+                                                        ↓
+                                        Docker volumes: database + site files
+```
 
-## Entry points
+A `.env` profile identifies one Compose project and Frappe site. The catalog holds repositories, default refs, declared major compatibility, and dependencies. `CUSTOM_APPS_FILE` adds user-provided repositories. These files are trusted shell-compatible configuration. `plan` orders dependencies. `lock` resolves refs to commits and records a plan checksum. `workspace` verifies the lock, snapshots sources, and creates an app build context and private credentials. `install` builds the image and creates a new development site. `status`, `logs`, and `credentials` inspect the result.
 
-- `install.sh` installs a released binary on macOS and Linux, then runs any supplied CLI command.
-- `install.ps1` does the same on Windows.
-- `install.bat` forwards to PowerShell for users who start from Batch.
-- `frappe1tap` owns all behaviour after bootstrap.
+A Compose project label is the ownership boundary. Before touching a project, `install` asks Docker for **all** matching containers (including stopped ones) and volumes. Any match means prior state exists. The default is to keep that state and exit without a build, `new-site`, or migration. A changed profile cannot bypass this check. Existing legacy `.frappe1tap` workspaces are located by their original project name; their data remains in the same Docker volumes.
 
-The released executable contains its official-app catalog. No Go, Python, Node, Bench, or Frappe installation is required before running it. Docker remains an external system requirement because its installation can require administrator approval, virtualization setup, or a reboot.
+Reset needs a running backend and site. It creates a Frappe backup with files, copies it outside Docker, checks expected artifacts, and asks for an exact typed project confirmation before Compose removes volumes. It then creates a fresh site from the locked workspace. The backup path is `.frappeup/backups/<project>/` beside the profile and is ignored by Git. Operators must independently verify restore capability.
 
-Tags beginning with `v` build checksum-verified macOS, Linux, and Windows archives through GitHub Actions. The bootstrap scripts download only these archives and verify their SHA-256 file before installation.
+App updates on an existing site are **not implemented**. Frappe apps live in the custom image while state persists in database and site volumes. A future migration command must build a replacement image, verify app/dependency compatibility, make a restorable backup, perform `install-app` and `bench migrate`, and check health. A single Compose backend may be unavailable during schema migration; this architecture does not promise zero downtime.
 
-## Configuration model
-
-One `.env` file describes one target. Multiple files create separate environments, for example `development.env` and `production.env`. The file contains Frappe, Frappe Docker template, version selection, and selected app IDs. `CUSTOM_APPS_FILE` points to a JSON file for repositories outside the official catalog.
-
-The official catalog owns repository URLs, known compatible references, app names, and declared dependencies. A profile does not duplicate these values.
-
-Each profile has an append-only JSON log at `.frappe1tap/logs/cli.jsonl`. The `logs` command reads it and can follow new records. Log events exclude raw environment values; embedded Git URL credentials and common token query parameters are redacted before error records are written.
-
-## Lifecycle
-
-1. `init` creates a profile file.
-2. `plan` resolves official and custom apps, validates the Frappe major version, and orders dependencies before dependent apps.
-3. `lock` resolves Frappe, Frappe Docker, and every app ref to a Git commit and creates an immutable production lock file.
-4. `workspace` checks the lock against the current profile, snapshots those commits locally, and generates a custom Frappe Docker build context. Bench receives local Git repositories through a fixed `frappe1tap-lock` branch, so it checks out the exact locked commits rather than a moving remote branch.
-5. `install` will generate an isolated Docker Compose project, create the site, fetch apps, install them, and record outcomes.
-6. `status`, `backup`, `restore`, `update`, and `destroy` will operate only on that project.
-
-The first four stages are implemented. Installation commands will not be added until Compose generation has deterministic tests.
-
-## Production rule
-
-Branches such as `version-16` are moving references. Development may use them. Production requires a lock that records the resolved commit for Frappe, Frappe Docker, and every app before anything is installed.
+The development profile publishes the frontend on `http://localhost:8080`. Production installation is gated until TLS, external backup/restore, monitoring, deployment, and rollback controls exist. Each app retains its own license.

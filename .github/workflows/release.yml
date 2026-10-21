@@ -1,45 +1,29 @@
-name: Release CLI
-
+name: Release script CLI
 on:
   push:
-    tags:
-      - "v*"
-
+    tags: ["v*"]
 permissions:
   contents: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.27.x"
-      - name: Build release archives
+      - name: Validate scripts
+        run: |
+          sh -n frappeup install.sh lib/common.sh
+          ./frappeup version
+          ./frappeup catalog list > /dev/null
+      - name: Package script bundles
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build release
-
-          build_unix() {
-            local os="$1"
-            local arch="$2"
-            local asset="frappe1tap_${os}_${arch}"
-            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "build/frappe1tap" ./cmd/frappe1tap
-            tar -C build -czf "release/${asset}.tar.gz" frappe1tap
-            (cd release && sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
-          }
-
-          build_unix linux amd64
-          build_unix linux arm64
-          build_unix darwin amd64
-          build_unix darwin arm64
-
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o build/frappe1tap.exe ./cmd/frappe1tap
-          (cd build && zip -q ../release/frappe1tap_windows_amd64.zip frappe1tap.exe)
-          (cd release && sha256sum frappe1tap_windows_amd64.zip > frappe1tap_windows_amd64.zip.sha256)
-      - name: Publish GitHub release
+          mkdir -p release
+          tar -czf release/frappeup_unix.tar.gz frappeup lib/common.sh catalog/official-apps.env
+          (cd release && sha256sum frappeup_unix.tar.gz > frappeup_unix.tar.gz.sha256)
+          zip -q release/frappeup_windows.zip frappeup.ps1 frappeup.bat catalog/official-apps.env
+          (cd release && sha256sum frappeup_windows.zip > frappeup_windows.zip.sha256)
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" release/* --generate-notes
