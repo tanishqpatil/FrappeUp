@@ -13,7 +13,12 @@
 - [x] Verify a disposable reset and independent restore end to end.
 - [x] Add a development app install/update migration flow that retains data and verifies health; verify an additive app installation on a disposable site.
 - [x] Add standalone backup, checksum verification, and explicit restore for an existing development site; verify an update checkpoint can restore the prior app inventory and data.
-- [ ] Test same-major app version updates and failed migrations in disposable projects.
+- [x] Test a same-major Payments commit update on a disposable site with retained data.
+- [x] Exercise an actual failing Bench migration patch and restore on a disposable project; retain a database record and private file.
+- [x] Exercise an actual failing patch through `app apply` and restore its checkpoint on a disposable macOS Docker project.
+- [ ] Validate failing-patch recovery on Windows Docker Desktop and Linux Docker.
+- [ ] Pin and verify runtime base images and build dependencies; app commit locks alone do not make builds reproducible.
+- [ ] Replace executable shell profile loading with a strict data parser and extend operation locking to all mutating commands.
 - [ ] Add automated recovery, off-host backups, and cross-host restore drills.
 - [ ] Windows end-to-end Docker verification.
 - [ ] Production installation, backup/restore, monitoring, update, and destroy.

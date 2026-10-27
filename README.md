@@ -68,7 +68,7 @@ Create a separate backup at any time with `frappeup backup --env-file erpnext.en
 
 To recover from a failed update, use the **profile and image that created the backup**, then run `frappeup restore --env-file erpnext.env --backup-dir PATH`. The command checks project, site, image and archive integrity, asks for `RESTORE <project-name>`, stops app services, restores the database and public/private files, then checks the restored site. `--yes` is available for controlled automation. Restore overwrites current site data and may lose writes made after the checkpoint; it currently supports only an existing development project on the same Docker host.
 
-This path currently supports development only, and it refuses Frappe core or Frappe Docker changes, app removal, mismatched project/site identities, or an unverified running image. Web requests and writes pause during migration. If a migration fails, FrappeUp stops and reports the backup path; it does **not** automatically roll back a database migration. Restore the matching backup with a version-matched image after assessing the failed site. Test recovery before using this on important data.
+This path currently supports development only, and it refuses Frappe core or Frappe Docker changes, app removal, non-forward app commits, changed target sources, mismatched project/site identities, or an unverified running image. Web requests and writes pause during migration. If a migration fails, FrappeUp stops and reports the backup path; it does **not** automatically roll back a database migration. Restore the matching backup with a version-matched image after assessing the failed site. Test recovery before using this on important data.
 
 ## Apps and versions
 

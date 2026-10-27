@@ -385,6 +385,13 @@ function App-Plan($Options) {
     if ($LASTEXITCODE -ne 0 -or $currentFrappe -ne $Lock['LOCK_FRAPPE_COMMIT']) { Fail 'Frappe core changed; this first app-update path supports app changes only' }
     $currentDocker=& git -C (Join-Path $CurrentWorkspace 'runtime') rev-parse HEAD 2>$null
     if ($LASTEXITCODE -ne 0 -or $currentDocker -ne $Lock['LOCK_FRAPPE_DOCKER_COMMIT']) { Fail 'Frappe Docker changed; pin its current commit for this app update' }
+    $targetFrappeSource=Join-Path $WorkspacePath 'runtime/sources/frappe'
+    $targetFrappe=& git -C $targetFrappeSource rev-parse HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or $targetFrappe -ne $Lock['LOCK_FRAPPE_COMMIT']) { Fail 'Target Frappe source does not match the lock' }
+    $targetDocker=& git -C (Join-Path $WorkspacePath 'runtime') rev-parse HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or $targetDocker -ne $Lock['LOCK_FRAPPE_DOCKER_COMMIT']) { Fail 'Target Frappe Docker source does not match the lock' }
+    $dirty=@(& git -C $targetFrappeSource status --porcelain)
+    if ($LASTEXITCODE -ne 0 -or $dirty.Count) { Fail 'Target Frappe source has uncommitted changes' }
     Doctor | Out-Null
     $currentCompose=Compose-Args $CurrentWorkspace
     $backend=& docker compose @currentCompose ps -q backend 2>$null
@@ -393,7 +400,7 @@ function App-Plan($Options) {
     $files=& docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $backend
     if ($owner -ne $Profile['PROJECT_NAME'] -or (($files -split ',') -notcontains (Join-Path $CurrentWorkspace 'runtime/compose.yaml'))) { Fail 'Running backend was not created from the current workspace' }
     $runtimeEnv=if (Test-Path (Join-Path $CurrentWorkspace 'runtime/.frappeup.env')) { Join-Path $CurrentWorkspace 'runtime/.frappeup.env' } else { Join-Path $CurrentWorkspace 'runtime/.frappe1tap.env' }
-    $currentImageMeta=Read-Env $runtimeEnv
+    $script:currentImageMeta=Read-Env $runtimeEnv
     $actualImage=& docker inspect --format '{{.Config.Image}}' $backend
     if ($actualImage -ne "$($currentImageMeta['CUSTOM_IMAGE']):$($currentImageMeta['CUSTOM_TAG'])") { Fail 'Running backend image does not match current workspace' }
     $inventory=& docker compose @currentCompose exec -T backend bench --site $Profile['SITE_NAME'] list-apps
@@ -407,12 +414,21 @@ function App-Plan($Options) {
         if ($name -notmatch '^[A-Za-z][A-Za-z0-9_]*$') { Fail "Invalid app package name $name" }
         $DesiredNames.Add($name)
         if (!$Lock["LOCK_APP_${id}_COMMIT"]) { Fail "Target lock lacks app $id" }
+        $targetSource=Join-Path $WorkspacePath "runtime/sources/apps/$id"
+        $targetCommit=& git -C $targetSource rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -ne 0 -or $targetCommit -ne $Lock["LOCK_APP_${id}_COMMIT"]) { Fail "Target source for $name does not match the lock" }
+        $dirty=@(& git -C $targetSource status --porcelain)
+        if ($LASTEXITCODE -ne 0 -or $dirty.Count) { Fail "Target source for $name has uncommitted changes" }
         if ($installed -contains $name) {
             $source=Join-Path $CurrentWorkspace "runtime/sources/apps/$id"
             if (!(Test-Path $source)) { Fail "Cannot verify current source for installed app $name" }
             $commit=& git -C $source rev-parse HEAD 2>$null
             if ($LASTEXITCODE -ne 0) { Fail "Cannot verify current commit for $name" }
-            if ($commit -ne $Lock["LOCK_APP_${id}_COMMIT"]) { $ChangedApps.Add($name) }
+            if ($commit -ne $targetCommit) {
+                & git -C $targetSource merge-base --is-ancestor $commit $targetCommit 2>$null
+                if ($LASTEXITCODE -ne 0) { Fail "App $name target is not a forward update; downgrades and branch switches need a separate workflow" }
+                $ChangedApps.Add($name)
+            }
         } else { $NewApps.Add($name) }
     }
     foreach ($name in $installed) { if ($DesiredNames -notcontains $name) { Fail "Target omits installed app $name; app removal is not supported" } }

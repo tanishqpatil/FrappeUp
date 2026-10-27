@@ -478,6 +478,10 @@ app_preflight() {
   current_docker=$(git -C "$CURRENT_WORKSPACE/runtime" rev-parse HEAD 2>/dev/null) || fail 'cannot verify current Frappe Docker commit'
   [ "$current_frappe" = "$LOCK_FRAPPE_COMMIT" ] || fail 'Frappe core changed; this first app-update path supports app changes only'
   [ "$current_docker" = "$LOCK_FRAPPE_DOCKER_COMMIT" ] || fail 'Frappe Docker changed; pin its current commit for this app update'
+  target_frappe=$(git -C "$WORKSPACE_DIR/runtime/sources/frappe" rev-parse HEAD 2>/dev/null) || fail 'cannot verify target Frappe source commit'
+  target_docker=$(git -C "$WORKSPACE_DIR/runtime" rev-parse HEAD 2>/dev/null) || fail 'cannot verify target Frappe Docker source commit'
+  [ "$target_frappe" = "$LOCK_FRAPPE_COMMIT" ] && [ "$target_docker" = "$LOCK_FRAPPE_DOCKER_COMMIT" ] || fail 'target source commits do not match the lock'
+  [ -z "$(git -C "$WORKSPACE_DIR/runtime/sources/frappe" status --porcelain)" ] || fail 'target Frappe source has uncommitted changes'
   doctor_check
   backend_id=$(compose_at "$CURRENT_WORKSPACE" ps -q backend 2>/dev/null) || backend_id=''
   [ -n "$backend_id" ] || fail 'current backend is not running; no data was changed'
@@ -503,10 +507,17 @@ app_preflight() {
     desired_names="$desired_names $app"
     eval "target_commit=\${LOCK_APP_${id}_COMMIT-}"
     [ -n "${target_commit:-}" ] || fail "target lock lacks app $id"
+    target_source="$WORKSPACE_DIR/runtime/sources/apps/$id"
+    target_head=$(git -C "$target_source" rev-parse HEAD 2>/dev/null) || fail "cannot verify target source for $app"
+    [ "$target_head" = "$target_commit" ] || fail "target source for $app does not match the lock"
+    [ -z "$(git -C "$target_source" status --porcelain)" ] || fail "target source for $app has uncommitted changes"
     if contains_word "$installed_names" "$app"; then
       [ -d "$CURRENT_WORKSPACE/runtime/sources/apps/$id" ] || fail "cannot verify current source for installed app $app"
       current_commit=$(git -C "$CURRENT_WORKSPACE/runtime/sources/apps/$id" rev-parse HEAD 2>/dev/null) || fail "cannot verify current commit for $app"
-      [ "$current_commit" = "$target_commit" ] || CHANGED_APPS="$CHANGED_APPS $app"
+      if [ "$current_commit" != "$target_commit" ]; then
+        git -C "$target_source" merge-base --is-ancestor "$current_commit" "$target_commit" || fail "app $app target is not a forward update; downgrades and branch switches need a separate workflow"
+        CHANGED_APPS="$CHANGED_APPS $app"
+      fi
     else
       NEW_APPS="$NEW_APPS $app"
     fi
