@@ -74,7 +74,7 @@ This path currently supports development only, and it refuses Frappe core or Fra
 
 The [official app catalog](catalog/official-apps.env) supplies repositories, default refs, declared Frappe majors, and dependencies. `INSTALL_APPS=erpnext,hrms` selects apps; `APP_ERPNEXT_REF=version-16` overrides a ref. Use `*_REF_KIND=branch`, `tag`, or `commit`. A lock records resolved commits; a workspace snapshots sources before build.
 
-For apps outside the catalog, use [custom app definitions](profiles/custom-apps.env.example) through `CUSTOM_APPS_FILE`. Treat profile and custom app files as trusted local scripts. The catalog is a starting point, not a compatibility guarantee for every version combination.
+For apps outside the catalog, use [custom app definitions](profiles/custom-apps.env.example) through `CUSTOM_APPS_FILE`. Profiles and custom app definitions are read as data: use one `KEY=VALUE` per line, optionally single- or double-quoted, with full-line comments. Duplicate or unsupported keys and unquoted shell expressions are rejected; quoted text is literal. Existing simple `.env` files remain compatible; replace shell commands, variable expansion, `export` statements, and duplicate assignments with literal values. Quote values containing spaces. The catalog is a starting point, not a compatibility guarantee for every version combination.
 
 The only implemented install profile is **development**. Production may be planned and locked but cannot yet be installed. See the [architecture](docs/ARCHITECTURE.md), [data lifecycle](docs/DATA_LIFECYCLE_PLAN.md), [existing tools](docs/ECOSYSTEM.md), [roadmap](TODO.md), and [contributing guide](CONTRIBUTING.md).
 

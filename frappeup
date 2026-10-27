@@ -11,8 +11,7 @@ fi
 . "$ROOT_DIR/lib/common.sh"
 CATALOG_FILE="$ROOT_DIR/catalog/official-apps.env"
 [ -r "$CATALOG_FILE" ] || fail "official app catalog is missing: $CATALOG_FILE"
-# shellcheck source=catalog/official-apps.env
-. "$CATALOG_FILE"
+read_env_file "$CATALOG_FILE" catalog
 
 VERSION='0.4.0'
 ENV_FILE=''
@@ -26,6 +25,7 @@ DOCKER_LOGS=false
 PLAN_APPS=''
 EXISTING_ACTION='ask'
 YES=false
+PROFILE_READ_KEYS=''
 
 usage() {
   cat <<'TEXT'
@@ -76,11 +76,10 @@ load_profile() {
   [ -r "$ENV_FILE" ] || fail "cannot read profile: $ENV_FILE"
   ENV_FILE=$(CDPATH= cd -- "$(dirname -- "$ENV_FILE")" && pwd)/$(basename -- "$ENV_FILE")
   ENV_DIR=$(dirname -- "$ENV_FILE")
-  # Profile files are shell-compatible KEY=VALUE files owned by the local user.
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
+  for previous_key in ${PROFILE_READ_KEYS:-}; do unset "$previous_key"; done
+  PROFILE_READ_KEYS=''
+  unset PROFILE PROJECT_NAME SITE_NAME WORKSPACE_DIR FRAPPE_REPOSITORY FRAPPE_REF FRAPPE_REF_KIND FRAPPE_DOCKER_REPOSITORY FRAPPE_DOCKER_REF FRAPPE_DOCKER_REF_KIND FRAPPE_MAJOR INSTALL_APPS CUSTOM_APPS_FILE
+  read_env_file "$ENV_FILE" profile
   PROFILE=${PROFILE:-development}
   PROJECT_NAME=${PROJECT_NAME:-frappeup}
   SITE_NAME=${SITE_NAME:-site.localhost}
@@ -108,10 +107,30 @@ load_profile() {
   if [ -n "${CUSTOM_APPS_FILE:-}" ]; then
     case "$CUSTOM_APPS_FILE" in /*) :;; *) CUSTOM_APPS_FILE="$ENV_DIR/$CUSTOM_APPS_FILE";; esac
     [ -r "$CUSTOM_APPS_FILE" ] || fail "cannot read CUSTOM_APPS_FILE: $CUSTOM_APPS_FILE"
-    # shellcheck disable=SC1090
-    . "$CUSTOM_APPS_FILE"
+    read_env_file "$CUSTOM_APPS_FILE" custom
     APP_IDS="$APP_IDS ${CUSTOM_APP_IDS:-}"
   fi
+  for profile_key in $PROFILE_READ_KEYS; do
+    case "$profile_key" in
+      APP_*_REF_KIND) profile_id=${profile_key#APP_}; profile_id=${profile_id%_REF_KIND} ;;
+      APP_*_REF) profile_id=${profile_key#APP_}; profile_id=${profile_id%_REF} ;;
+      *) continue ;;
+    esac
+    profile_known=false
+    for profile_app in $APP_IDS; do
+      if [ "$(upper "$profile_app")" = "$profile_id" ]; then profile_known=true; break; fi
+    done
+    [ "$profile_known" = true ] || fail "unknown app override: $profile_key"
+  done
+  # Profile overrides come only from this file, not the invoking environment.
+  for profile_app in $APP_IDS $(printf '%s' "$INSTALL_APPS" | tr ',' ' '); do
+    valid_app_id "$profile_app" || fail "invalid app id: $profile_app"
+    profile_app_key=$(upper "$profile_app")
+    for profile_suffix in REF REF_KIND; do
+      profile_override="APP_${profile_app_key}_${profile_suffix}"
+      case " ${PROFILE_READ_KEYS:-} " in *" $profile_override "*) :;; *) unset "$profile_override";; esac
+    done
+  done
 }
 
 app_field() {
@@ -183,8 +202,7 @@ resolve_commit() {
 load_lock() {
   [ -n "$LOCK_FILE" ] || LOCK_FILE="$ENV_FILE.lock.env"
   [ -r "$LOCK_FILE" ] || fail "cannot read lock file: $LOCK_FILE"
-  # shellcheck disable=SC1090
-  . "$LOCK_FILE"
+  read_env_file "$LOCK_FILE" lock
   case "${LOCK_SCHEMA:-}" in
     1)
       [ "$LOCK_PLAN_SHA256" = "$(legacy_plan_checksum)" ] || fail 'lock file does not match profile; run lock and workspace again'
@@ -351,7 +369,7 @@ validate_install_workspace() {
   runtime="$WORKSPACE_DIR/runtime"
   [ -r "$runtime/images/custom/Containerfile" ] && [ -r "$runtime/apps.json" ] && [ -r "$WORKSPACE_DIR/credentials.env" ] || fail 'workspace is incomplete; run workspace first'
   [ -r "$WORKSPACE_DIR/workspace.env" ] || fail 'workspace metadata is missing; run workspace first'
-  . "$WORKSPACE_DIR/workspace.env"
+  read_env_file "$WORKSPACE_DIR/workspace.env" workspace
   [ "$WORKSPACE_PLAN_SHA256" = "$LOCK_PLAN_SHA256" ] || fail 'workspace does not match lock; run workspace again'
 }
 
@@ -472,7 +490,7 @@ app_preflight() {
   runtime="$WORKSPACE_DIR/runtime"
   [ -r "$runtime/images/custom/Containerfile" ] && [ -r "$runtime/apps.json" ] && [ -r "$WORKSPACE_DIR/workspace.env" ] && [ -r "$WORKSPACE_DIR/credentials.env" ] || fail 'target workspace is incomplete; run workspace for the target profile'
   [ -r "$CURRENT_WORKSPACE/credentials.env" ] && [ -r "$CURRENT_WORKSPACE/runtime/compose.yaml" ] || fail 'current workspace is incomplete'
-  . "$WORKSPACE_DIR/workspace.env"
+  read_env_file "$WORKSPACE_DIR/workspace.env" workspace
   [ "$WORKSPACE_PLAN_SHA256" = "$LOCK_PLAN_SHA256" ] || fail 'target workspace does not match its lock'
   current_frappe=$(git -C "$CURRENT_WORKSPACE/runtime/sources/frappe" rev-parse HEAD 2>/dev/null) || fail 'cannot verify current Frappe source commit'
   current_docker=$(git -C "$CURRENT_WORKSPACE/runtime" rev-parse HEAD 2>/dev/null) || fail 'cannot verify current Frappe Docker commit'

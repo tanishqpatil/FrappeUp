@@ -6,17 +6,36 @@ $CatalogPath = Join-Path $Root 'catalog\official-apps.env'
 $Version = '0.4.0'
 
 function Fail([string]$Message) { throw $Message }
-function Read-Env([string]$Path) {
+function Read-Env([string]$Path,[string]$Kind='generic') {
     if (!(Test-Path $Path)) { Fail "Cannot read $Path" }
     $map = @{}
     foreach ($line in [IO.File]::ReadAllLines($Path)) {
         $line = $line.Trim()
         if (!$line -or $line.StartsWith('#')) { continue }
-        if ($line -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { Fail "Invalid KEY=VALUE line in $Path" }
-        $value = $Matches[2].Trim()
-        if ($value.Length -ge 2 -and $value.StartsWith("'") -and $value.EndsWith("'")) { $value = $value.Substring(1,$value.Length-2).Replace("'\''", "'") }
-        elseif ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) { $value = $value.Substring(1,$value.Length-2) }
-        $map[$Matches[1]] = $value
+        if ($line -cnotmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { Fail "Invalid KEY=VALUE line in $Path" }
+        $key=$Matches[1]; $value=$Matches[2]
+        $allowed=switch ($Kind) {
+            'profile' { $key -cmatch '^(PROFILE|PROJECT_NAME|SITE_NAME|WORKSPACE_DIR|FRAPPE_REPOSITORY|FRAPPE_REF|FRAPPE_REF_KIND|FRAPPE_DOCKER_REPOSITORY|FRAPPE_DOCKER_REF|FRAPPE_DOCKER_REF_KIND|FRAPPE_MAJOR|INSTALL_APPS|CUSTOM_APPS_FILE)$' -or $key -cmatch '^APP_[A-Z0-9_]+_REF(_KIND)?$' }
+            'custom' { $key -ceq 'CUSTOM_APP_IDS' -or $key -cmatch '^APP_[A-Za-z0-9_]+_(DISPLAY_NAME|REPOSITORY|REF|REF_KIND|APP_NAME|REQUIRES|MAJORS)$' }
+            'catalog' { $key -ceq 'APP_IDS' -or $key -cmatch '^APP_[A-Za-z0-9_]+_(DISPLAY_NAME|REPOSITORY|REF|REF_KIND|APP_NAME|REQUIRES|MAJORS)$' }
+            'lock' { $key -cmatch '^LOCK_(SCHEMA|PLAN_SHA256|PROJECT_NAME|SITE_NAME|FRAPPE_REPOSITORY|FRAPPE_REF|FRAPPE_REF_KIND|FRAPPE_COMMIT|FRAPPE_DOCKER_REPOSITORY|FRAPPE_DOCKER_REF|FRAPPE_DOCKER_REF_KIND|FRAPPE_DOCKER_COMMIT|APP_IDS)$' -or $key -cmatch '^LOCK_APP_[A-Za-z0-9_]+_(REPOSITORY|REF|REF_KIND|APP_NAME|COMMIT)$' }
+            'workspace' { $key -cmatch '^(WORKSPACE_PLAN_SHA256|IMAGE|TAG)$' }
+            'generic' { $true }
+            default { $false }
+        }
+        if (!$allowed -or $map.ContainsKey($key) -or $value.Contains("`t")) { Fail "Invalid, duplicate, or unsupported setting in $Path" }
+        if ($value.StartsWith("'")) {
+            if ($value.Length -lt 2 -or !$value.EndsWith("'")) { Fail "Invalid quoted value in $Path" }
+            $inner=$value.Substring(1,$value.Length-2)
+            if ($inner.Replace("'\''",'').Contains("'")) { Fail "Invalid quoted value in $Path" }
+            $value=$inner.Replace("'\''", "'")
+        } elseif ($value.StartsWith('"')) {
+            if ($value.Length -lt 2 -or !$value.EndsWith('"')) { Fail "Invalid quoted value in $Path" }
+            $value=$value.Substring(1,$value.Length-2)
+            if ($value.Contains('"')) { Fail "Invalid quoted value in $Path" }
+        } elseif ($value -match '\s' -or $value.IndexOfAny([char[]]@("'",'"','`','$',';','&','|','<','>','(',')')) -ge 0) { Fail "Invalid unquoted value in $Path" }
+        if ($key -cmatch '_REF_KIND$' -and $value -cnotin @('branch','tag','commit')) { Fail "Invalid ref kind in $Path" }
+        $map[$key] = $value
     }
     return $map
 }
@@ -52,7 +71,7 @@ function Parse-Options([string[]]$Items) {
 function Load-Profile($Options) {
     if (!$Options['--env-file']) { Fail '--env-file is required' }
     $script:EnvPath=[IO.Path]::GetFullPath($Options['--env-file'])
-    $script:Profile=Read-Env $EnvPath
+    $script:Profile=Read-Env $EnvPath 'profile'
     $script:Profile['PROFILE']=Get-Val $Profile 'PROFILE' 'development'
     $script:Profile['PROJECT_NAME']=Get-Val $Profile 'PROJECT_NAME' 'frappeup'
     $script:Profile['SITE_NAME']=Get-Val $Profile 'SITE_NAME' 'site.localhost'
@@ -63,7 +82,7 @@ function Load-Profile($Options) {
     $script:Profile['FRAPPE_DOCKER_REF']=Get-Val $Profile 'FRAPPE_DOCKER_REF' 'main'
     $script:Profile['FRAPPE_DOCKER_REF_KIND']=Get-Val $Profile 'FRAPPE_DOCKER_REF_KIND' 'branch'
     $script:Profile['FRAPPE_MAJOR']=Get-Val $Profile 'FRAPPE_MAJOR' '16'
-    if ($Profile['PROFILE'] -notin 'development','production') { Fail 'PROFILE must be development or production' }
+    if ($Profile['PROFILE'] -cnotin 'development','production') { Fail 'PROFILE must be development or production' }
     if ($Profile['PROJECT_NAME'] -notmatch '^[A-Za-z0-9_-]+$') { Fail 'Invalid PROJECT_NAME' }
     if ($Profile['SITE_NAME'] -notmatch '^[A-Za-z0-9.-]+$') { Fail 'Invalid SITE_NAME' }
     if ($Profile['FRAPPE_MAJOR'] -notmatch '^[1-9][0-9]*$') { Fail 'Invalid FRAPPE_MAJOR' }
@@ -72,13 +91,17 @@ function Load-Profile($Options) {
     $workspace=Get-Val $Profile 'WORKSPACE_DIR' $(if (Test-Path $legacyWorkspace) { ".frappe1tap/workspaces/$($Profile['PROJECT_NAME'])" } else { ".frappeup/workspaces/$($Profile['PROJECT_NAME'])" })
     $script:WorkspacePath=[IO.Path]::GetFullPath((Join-Path $envDir $workspace))
     $script:LogDir=Join-Path $envDir $(if ($WorkspacePath -like '*.frappe1tap\workspaces\*') { '.frappe1tap/logs' } else { '.frappeup/logs' })
-    $script:Catalog=Read-Env $CatalogPath
+    $script:Catalog=Read-Env $CatalogPath 'catalog'
     $custom=Get-Val $Profile 'CUSTOM_APPS_FILE'
     if ($custom) {
         $customPath=[IO.Path]::GetFullPath((Join-Path $envDir $custom))
-        $extra=Read-Env $customPath
+        $extra=Read-Env $customPath 'custom'
         foreach ($key in $extra.Keys) { $Catalog[$key]=$extra[$key] }
         $Catalog['APP_IDS'] += ' ' + (Get-Val $extra 'CUSTOM_APP_IDS')
+    }
+    $knownIds=@((Get-Val $Catalog 'APP_IDS') -split '\s+' | Where-Object { $_ } | ForEach-Object { $_.ToUpperInvariant() })
+    foreach ($key in $Profile.Keys) {
+        if ($key -cmatch '^APP_(.+)_REF(_KIND)?$' -and $knownIds -cnotcontains $Matches[1]) { Fail "Unknown app override: $key" }
     }
 }
 function App-Field([string]$Id,[string]$Field) {
@@ -124,7 +147,7 @@ function Resolve-Commit([string]$Repository,[string]$Ref,[string]$Kind) {
 }
 function Load-Lock($Options) {
     $script:LockPath=if ($Options['--lock-file']) { $Options['--lock-file'] } else { "$EnvPath.lock.env" }
-    $script:Lock=Read-Env $LockPath
+    $script:Lock=Read-Env $LockPath 'lock'
     if ($Lock['LOCK_SCHEMA'] -eq '1') {
         if ($Lock['LOCK_PLAN_SHA256'] -ne (Legacy-Plan-Hash)) { Fail 'Lock does not match profile; run lock and workspace again' }
         if ($Profile['FRAPPE_REF_KIND'] -ne 'branch' -or $Profile['FRAPPE_DOCKER_REF_KIND'] -ne 'branch' -or (Get-Val $Profile 'CUSTOM_APPS_FILE')) { Fail 'Legacy lock cannot verify ref kinds; run lock and workspace again' }
@@ -379,7 +402,7 @@ function App-Plan($Options) {
     foreach ($needed in @((Join-Path $targetRuntime 'images/custom/Containerfile'),(Join-Path $targetRuntime 'apps.json'),(Join-Path $WorkspacePath 'workspace.env'),(Join-Path $WorkspacePath 'credentials.env'),(Join-Path $CurrentWorkspace 'credentials.env'),(Join-Path $CurrentWorkspace 'runtime/compose.yaml'))) {
         if (!(Test-Path $needed)) { Fail "Workspace is incomplete: $needed" }
     }
-    $metadata=Read-Env (Join-Path $WorkspacePath 'workspace.env')
+    $metadata=Read-Env (Join-Path $WorkspacePath 'workspace.env') 'workspace'
     if ($metadata['WORKSPACE_PLAN_SHA256'] -ne $Lock['LOCK_PLAN_SHA256']) { Fail 'Target workspace does not match its lock' }
     $currentFrappe=& git -C (Join-Path $CurrentWorkspace 'runtime/sources/frappe') rev-parse HEAD 2>$null
     if ($LASTEXITCODE -ne 0 -or $currentFrappe -ne $Lock['LOCK_FRAPPE_COMMIT']) { Fail 'Frappe core changed; this first app-update path supports app changes only' }
@@ -553,7 +576,7 @@ try {
     if ($command -in 'version','--version') { $Version; exit 0 }
     if ($command -eq 'catalog') {
         if ($Arguments.Count -ne 2 -or $Arguments[1] -ne 'list') { Fail 'Use catalog list' }
-        $catalog=Read-Env $CatalogPath
+        $catalog=Read-Env $CatalogPath 'catalog'
         foreach ($id in ($catalog['APP_IDS'] -split '\s+')) { "$id`t$($catalog["APP_${id}_DISPLAY_NAME"])`t$($catalog["APP_${id}_REF_KIND"]) @ $($catalog["APP_${id}_REF"])" }
         exit 0
     }
@@ -656,7 +679,7 @@ try {
         Load-Lock $opts
         $runtime=Join-Path $WorkspacePath 'runtime'
         foreach ($needed in @((Join-Path $runtime 'images/custom/Containerfile'),(Join-Path $runtime 'apps.json'),(Join-Path $WorkspacePath 'credentials.env'),(Join-Path $WorkspacePath 'workspace.env'))) { if (!(Test-Path $needed)) { Fail 'Workspace is incomplete; run workspace first' } }
-        $meta=Read-Env (Join-Path $WorkspacePath 'workspace.env')
+        $meta=Read-Env (Join-Path $WorkspacePath 'workspace.env') 'workspace'
         if ($meta['WORKSPACE_PLAN_SHA256'] -ne $Lock['LOCK_PLAN_SHA256']) { Fail 'Workspace does not match lock' }
         $image="frappeup/$($Profile['PROJECT_NAME'])"; $tag=$Lock['LOCK_PLAN_SHA256'].Substring(0,12)
         Run docker @('buildx','build','--platform','linux/amd64','--load','--tag',"${image}:$tag",'--file',(Join-Path $runtime 'images/custom/Containerfile'),'--secret',"id=apps_json,src=$(Join-Path $runtime 'apps.json')",$runtime)

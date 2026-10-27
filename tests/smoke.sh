@@ -11,17 +11,71 @@ printf 'ADMIN_PASSWORD=test-secret\nDB_PASSWORD=private-db-secret\n' > "$TEMP/.f
 grep -q '^Login: Administrator$' "$TEMP/credentials.out"
 grep -q '^Initial password: test-secret$' "$TEMP/credentials.out"
 if grep -q 'private-db-secret' "$TEMP/credentials.out"; then echo 'database secret was exposed' >&2; exit 1; fi
-printf '\nINSTALL_APPS=hrms\nFRAPPE_REF=%040d\nFRAPPE_REF_KIND=commit\nFRAPPE_DOCKER_REF=%040d\nFRAPPE_DOCKER_REF_KIND=commit\nAPP_ERPNEXT_REF=%040d\nAPP_ERPNEXT_REF_KIND=commit\nAPP_HRMS_REF=%040d\nAPP_HRMS_REF_KIND=commit\n' 1 2 3 4 >> "$TEMP/test.env"
+cat > "$TEMP/test.env" <<'PROFILE'
+PROFILE=development
+PROJECT_NAME=frappeup-dev
+SITE_NAME=site.localhost
+INSTALL_APPS=hrms
+FRAPPE_REF=0000000000000000000000000000000000000001
+FRAPPE_REF_KIND=commit
+FRAPPE_DOCKER_REF=0000000000000000000000000000000000000002
+FRAPPE_DOCKER_REF_KIND=commit
+APP_ERPNEXT_REF=0000000000000000000000000000000000000003
+APP_ERPNEXT_REF_KIND=commit
+APP_HRMS_REF=0000000000000000000000000000000000000004
+APP_HRMS_REF_KIND=commit
+PROFILE
 plan=$("$ROOT/frappeup" plan --env-file "$TEMP/test.env")
 printf '%s\n' "$plan" | grep -q 'erpnext \[commit\]'
 printf '%s\n' "$plan" | grep -q 'hrms \[commit\]'
 "$ROOT/frappeup" lock --env-file "$TEMP/test.env" >/dev/null
 [ -s "$TEMP/test.env.lock.env" ]
-printf '\nSITE_NAME=changed.localhost\n' >> "$TEMP/test.env"
+cp "$TEMP/test.env.lock.env" "$TEMP/good.lock.env"
+printf 'LOCK_SCHEMA=2\n' >> "$TEMP/test.env.lock.env"
+if "$ROOT/frappeup" workspace --env-file "$TEMP/test.env" > /dev/null 2>&1; then echo 'duplicate lock key was accepted' >&2; exit 1; fi
+mv "$TEMP/good.lock.env" "$TEMP/test.env.lock.env"
+sed 's/^SITE_NAME=.*/SITE_NAME=changed.localhost/' "$TEMP/test.env" > "$TEMP/changed.env"
+mv "$TEMP/changed.env" "$TEMP/test.env"
 if "$ROOT/frappeup" workspace --env-file "$TEMP/test.env" >"$TEMP/install.out" 2>&1; then
   echo 'stale lock was accepted' >&2; exit 1
 fi
 grep -q 'lock file does not match profile' "$TEMP/install.out"
+printf 'PROFILE=development\nPROFILE=production\n' > "$TEMP/duplicate.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/duplicate.env" > /dev/null 2>&1; then echo 'duplicate profile key was accepted' >&2; exit 1; fi
+printf 'PROFILE=development\nPATH=/tmp\n' > "$TEMP/unknown.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/unknown.env" > /dev/null 2>&1; then echo 'unknown profile key was accepted' >&2; exit 1; fi
+printf 'PROFILE=development\nAPP_MISSING_REF=main\n' > "$TEMP/unknown.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/unknown.env" > /dev/null 2>&1; then echo 'unknown app override was accepted' >&2; exit 1; fi
+printf 'PROFILE=development\nFRAPPE_REF_KIND=invalid\n' > "$TEMP/unknown.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/unknown.env" > /dev/null 2>&1; then echo 'invalid ref kind was accepted' >&2; exit 1; fi
+printf 'PROFILE=development\nPROJECT_NAME=$(touch %s)\n' "$TEMP/executed" > "$TEMP/injection.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/injection.env" > /dev/null 2>&1; then echo 'executable profile syntax was accepted' >&2; exit 1; fi
+[ ! -e "$TEMP/executed" ] || { echo 'profile executed a command' >&2; exit 1; }
+printf 'PROFILE=development\ntouch %s\n' "$TEMP/executed" > "$TEMP/injection.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/injection.env" > /dev/null 2>&1; then echo 'profile command was accepted' >&2; exit 1; fi
+[ ! -e "$TEMP/executed" ] || { echo 'profile executed a command' >&2; exit 1; }
+printf "PROFILE=development\nFRAPPE_REPOSITORY='\$(touch %s)'\n" "$TEMP/quoted-executed" > "$TEMP/quoted.env"
+"$ROOT/frappeup" plan --env-file "$TEMP/quoted.env" > "$TEMP/quoted.out"
+[ ! -e "$TEMP/quoted-executed" ] || { echo 'quoted profile value executed a command' >&2; exit 1; }
+grep -F '$(touch ' "$TEMP/quoted.out" >/dev/null
+printf 'PROFILE=development\nINSTALL_APPS=erpnext\n' > "$TEMP/defaults.env"
+APP_ERPNEXT_REF=unexpected "$ROOT/frappeup" plan --env-file "$TEMP/defaults.env" > "$TEMP/defaults.out"
+grep -F 'erpnext [branch] @ version-16' "$TEMP/defaults.out" >/dev/null
+printf 'PROFILE=development\nCUSTOM_APPS_FILE=unsafe-custom.env\n' > "$TEMP/custom-profile.env"
+printf 'CUSTOM_APP_IDS=example\nPATH=/tmp\n' > "$TEMP/unsafe-custom.env"
+if "$ROOT/frappeup" plan --env-file "$TEMP/custom-profile.env" > /dev/null 2>&1; then echo 'unsafe custom app key was accepted' >&2; exit 1; fi
+printf 'PROFILE=development\nCUSTOM_APPS_FILE=custom.env\nINSTALL_APPS=example\n' > "$TEMP/custom-profile.env"
+cat > "$TEMP/custom.env" <<'CUSTOM'
+CUSTOM_APP_IDS=example
+APP_example_REPOSITORY=https://example.invalid/repository
+APP_example_REF='$(touch /tmp/frappeup-custom-must-not-execute)'
+APP_example_REF_KIND=branch
+APP_example_APP_NAME=example
+APP_example_REQUIRES=''
+APP_example_MAJORS=16
+CUSTOM
+"$ROOT/frappeup" plan --env-file "$TEMP/custom-profile.env" > "$TEMP/custom.out"
+grep -F '$(touch /tmp/frappeup-custom-must-not-execute)' "$TEMP/custom.out" >/dev/null
 FRAPPEUP_INSTALL_DIR="$TEMP/bin" "$ROOT/install.sh" version > "$TEMP/bootstrap.out"
 grep -q '0.4.0' "$TEMP/bootstrap.out"
 "$TEMP/bin/frappeup" catalog list > "$TEMP/catalog.out"
@@ -71,6 +125,9 @@ grep -q "^FRAPPE_REF_KIND='commit'$" "$PREP/next.env"
 grep -q "^FRAPPE_DOCKER_REF_KIND='commit'$" "$PREP/next.env"
 grep -q "^APP_ERPNEXT_REF_KIND='commit'$" "$PREP/next.env"
 grep -q "^INSTALL_APPS='erpnext'$" "$PREP/next.env"
+mkdir -p "$PREP/space and apostrophe's"
+"$ROOT/frappeup" app prepare --current-env-file "$PREP/current.env" --env-file "$PREP/space and apostrophe's/next.env" >/dev/null
+"$ROOT/frappeup" plan --env-file "$PREP/space and apostrophe's/next.env" >/dev/null
 if "$ROOT/frappeup" app prepare --current-env-file "$PREP/current.env" --env-file "$PREP/next.env" > "$PREP/repeat.out" 2>&1; then
   echo 'app prepare overwrote an existing target profile' >&2; exit 1
 fi
@@ -84,6 +141,9 @@ tar -czf "$BACKUP/test-private-files.tgz" -C "$TEMP" private-marker
 printf '{}\n' > "$BACKUP/test-site_config_backup.json"
 printf "BACKUP_PROJECT='other-project'\nBACKUP_SITE='site.localhost'\nBACKUP_IMAGE='test:tag'\n" > "$BACKUP/manifest.env"
 . "$ROOT/lib/common.sh"
+printf 'WORKSPACE_PLAN_SHA256=test\n$(touch %s)\n' "$TEMP/executed" > "$TEMP/unsafe-workspace.env"
+if (read_env_file "$TEMP/unsafe-workspace.env" workspace) > /dev/null 2>&1; then echo 'executable workspace metadata was accepted' >&2; exit 1; fi
+[ ! -e "$TEMP/executed" ] || { echo 'workspace metadata executed a command' >&2; exit 1; }
 for artifact in test-database.sql.gz test-files.tgz test-private-files.tgz test-site_config_backup.json; do
   printf '%s  %s\n' "$(sha256 < "$BACKUP/$artifact")" "$artifact" >> "$BACKUP/SHA256SUMS"
 done

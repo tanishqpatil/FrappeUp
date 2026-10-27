@@ -4,6 +4,10 @@ FrappeUp is a terminal-only Frappe lifecycle manager. Host entry points remain P
 
 Unchecked items are planned capabilities, not claims of current support. Work proceeds in the order below, with a plan and relevant verification before each implementation is marked complete.
 
+## Implementation workflow
+
+For every current and future change: (1) plan the scope, safety boundaries, and verification; (2) implement one checklist item at a time using the existing terminal-only scripting architecture; (3) run relevant automated checks and realistic disposable integration tests, including failure and data-preservation cases where applicable; (4) review the results, document limitations, and update the checklist only for verified work; (5) commit and push only when the change is sufficiently tested and stable. If a required platform or test is unavailable, leave the item open and report the evidence and remaining gap instead of claiming certainty.
+
 ## Completed foundation
 
 - [x] Script-only CLI and source bootstrap for macOS/Linux.
@@ -22,10 +26,10 @@ Unchecked items are planned capabilities, not claims of current support. Work pr
 - [x] Test a same-major Payments commit update on a disposable site with retained data.
 - [x] Exercise an actual failing Bench migration patch and restore on a disposable project; retain a database record and private file.
 - [x] Exercise an actual failing patch through `app apply` and restore its checkpoint on a disposable macOS Docker project.
+- [x] Parse profile, app catalog, custom app, lock, and workspace metadata as data in shell and PowerShell; reject duplicate and unsupported settings, and document the supported format and migration from shell expressions.
 
 ## 1. Shared safeguards and release identity
 
-- [ ] **Parse configuration as data:** replace executable shell profile loading with strict, equivalent shell and PowerShell parsers; validate settings without executing their contents and document migration for existing profiles.
 - [ ] **Lock every mutating operation:** prevent overlapping install, update, restore, reset, and lifecycle changes on the same project; record operation ownership and explain recovery after interruption.
 - [ ] **Verify exact release images:** record the image identity, app commits, target platform, and build provenance; detect replaced tags and preserve the matching previous image for recovery.
 - [ ] **Reuse verified artifacts:** deploy or restore the same retained image without rebuilding or resolving branches again. Keep deployment repeatability distinct from reproducible source builds.
